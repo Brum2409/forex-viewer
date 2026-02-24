@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0D1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Live forex rates updated every 15 minutes — optimized for mobile">
+  <title>FX Live — Forex Rates</title>
+  <link rel="manifest" href="manifest.json">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Design tokens ─────────────────────────────────────── */
+    :root {
+      --bg0: #0D1117;
+      --bg1: #161B22;
+      --bg2: #21262D;
+      --border: #30363D;
+      --txt1: #E6EDF3;
+      --txt2: #8B949E;
+      --txt3: #6E7681;
+      --green: #3FB950;
+      --red:   #F85149;
+      --blue:  #58A6FF;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --radius: 12px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    /* ── Reset ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: var(--font);
+      background: var(--bg0);
+      color: var(--txt1);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font-family: inherit; cursor: pointer; }
+    input { font-family: inherit; }
+
+    /* ── App shell ─────────────────────────────────────────── */
+    .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+    /* ── Top header ────────────────────────────────────────── */
+    .header {
+      flex-shrink: 0;
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header-brand { display: flex; align-items: center; gap: 10px; }
+    .brand-icon {
+      width: 34px; height: 34px;
+      background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 100%);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; font-weight: 700; color: #fff;
+      letter-spacing: -1px;
+    }
+    .brand-text { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+    .brand-sub  { font-size: 10px; color: var(--txt3); margin-top: 1px; }
+
+    .refresh-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--txt1);
+      padding: 6px 11px;
+      border-radius: 8px;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 500;
+      transition: background 0.15s;
+    }
+    .refresh-btn:active { background: var(--bg2); }
+    .spin-icon { display: inline-block; font-size: 15px; transition: transform 0.3s; }
+    .spin-icon.spinning { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Status strip ──────────────────────────────────────── */
+    .status-bar {
+      flex-shrink: 0;
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      padding: 5px 16px;
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 11px; color: var(--txt3);
+    }
+    .live-dot {
+      display: inline-block;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green); margin-right: 5px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .live-dot.err { background: var(--red); animation: none; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+    /* ── Search ────────────────────────────────────────────── */
+    .search-wrap {
+      flex-shrink: 0;
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+    }
+    .search-input {
+      width: 100%;
+      background: var(--bg0);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 11px 7px 32px;
+      color: var(--txt1);
+      font-size: 14px;
+      outline: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%236E7681' stroke-width='2.5'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: 10px center;
+      transition: border-color 0.15s;
+    }
+    .search-input:focus { border-color: var(--blue); }
+    .search-input::placeholder { color: var(--txt3); }
+
+    /* ── Scrollable content ────────────────────────────────── */
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: calc(8px + var(--safe-bottom));
+    }
+
+    /* ── Category heading ──────────────────────────────────── */
+    .cat-head {
+      padding: 10px 14px 4px;
+      font-size: 10px; font-weight: 700;
+      color: var(--txt3);
+      text-transform: uppercase; letter-spacing: 0.8px;
+    }
+
+    /* ── Pair list ─────────────────────────────────────────── */
+    .pair-list { padding: 0 8px; }
+
+    /* ── Pair card ─────────────────────────────────────────── */
+    .card {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px 10px;
+      margin-bottom: 7px;
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 8px;
+      row-gap: 8px;
+      align-items: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .card:active { background: var(--bg2); border-color: var(--blue); }
+
+    .card-left { display: flex; align-items: center; gap: 9px; }
+    .flags { font-size: 20px; line-height: 1; }
+    .pair-name { font-size: 15px; font-weight: 700; letter-spacing: 0.2px; }
+    .pair-sub  { font-size: 10px; color: var(--txt3); margin-top: 1px; }
+
+    .card-right { text-align: right; }
+    .rate-val {
+      font-size: 17px; font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.3px;
+    }
+    .chg {
+      font-size: 12px; font-weight: 600; margin-top: 2px;
+      color: var(--txt3);
+    }
+    .chg.up   { color: var(--green); }
+    .chg.down { color: var(--red); }
+
+    .card-bottom {
+      grid-column: 1 / -1;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .sparkline { height: 28px; flex: 1; min-width: 0; overflow: visible; }
+
+    /* ── Loading / Error ───────────────────────────────────── */
+    .center-msg {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 60px 20px; gap: 12px; color: var(--txt2);
+    }
+    .loader {
+      width: 28px; height: 28px;
+      border: 3px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    .err-title { color: var(--red); font-size: 16px; font-weight: 600; }
+    .retry-btn {
+      margin-top: 4px;
+      background: var(--blue); border: none; color: #fff;
+      padding: 9px 20px; border-radius: 8px; font-size: 14px;
+    }
+
+    /* ── Detail slide-over panel ───────────────────────────── */
+    .detail {
+      position: fixed; inset: 0;
+      background: var(--bg0);
+      z-index: 300;
+      display: flex; flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
+      will-change: transform;
+    }
+    .detail.open { transform: translateX(0); }
+
+    .detail-header {
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 12px;
+      flex-shrink: 0;
+    }
+    .back-btn {
+      background: none; border: none;
+      color: var(--blue); font-size: 14px;
+      display: flex; align-items: center; gap: 4px;
+      padding: 4px 2px;
+    }
+    .d-title { flex: 1; }
+    .d-pair   { font-size: 19px; font-weight: 700; }
+    .d-full   { font-size: 11px; color: var(--txt2); margin-top: 1px; }
+    .d-right  { text-align: right; }
+    .d-rate   {
+      font-size: 22px; font-weight: 700;
+      font-variant-numeric: tabular-nums; letter-spacing: -0.5px;
+    }
+    .d-chg    { font-size: 13px; font-weight: 600; }
+    .d-chg.up   { color: var(--green); }
+    .d-chg.down { color: var(--red); }
+
+    /* Period tabs */
+    .periods {
+      flex-shrink: 0;
+      display: flex; gap: 6px;
+      padding: 8px 14px;
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .periods::-webkit-scrollbar { display: none; }
+    .period-btn {
+      background: none; border: 1px solid var(--border);
+      color: var(--txt2); padding: 5px 13px;
+      border-radius: 6px; font-size: 13px; font-weight: 500;
+      white-space: nowrap; transition: all 0.12s;
+    }
+    .period-btn.active {
+      background: var(--blue); border-color: var(--blue); color: #fff;
+    }
+
+    /* Chart */
+    .chart-wrap {
+      flex-shrink: 0;
+      padding: 14px 14px 0;
+      height: 220px; position: relative;
+    }
+    .chart-loading {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* Stats grid */
+    .stats-grid {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 7px; padding: 12px 14px;
+    }
+    .stat-card {
+      background: var(--bg1); border: 1px solid var(--border);
+      border-radius: 9px; padding: 10px 12px;
+    }
+    .stat-label {
+      font-size: 10px; color: var(--txt3);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+    }
+    .stat-val {
+      font-size: 15px; font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Info block */
+    .info-block {
+      margin: 0 14px 14px;
+      background: var(--bg1); border: 1px solid var(--border);
+      border-radius: 9px; padding: 12px;
+    }
+    .info-title {
+      font-size: 10px; color: var(--txt3);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+    }
+    .info-row {
+      display: flex; justify-content: space-between;
+      font-size: 13px; margin-bottom: 6px;
+    }
+    .info-row:last-child { margin-bottom: 0; }
+    .info-k { color: var(--txt2); }
+    .info-v { font-variant-numeric: tabular-nums; font-weight: 500; }
+
+    /* Detail scrollable body */
+    .detail-body {
+      flex: 1; overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: calc(12px + var(--safe-bottom));
+    }
+
+    /* ── Responsive: wider screens ─────────────────────────── */
+    @media (min-width: 640px) {
+      .pair-list { display: grid; grid-template-columns: repeat(2,1fr); gap: 7px; }
+      .card { margin-bottom: 0; }
+    }
+    @media (min-width: 1024px) {
+      .pair-list { grid-template-columns: repeat(3,1fr); }
+      .detail {
+        left: auto; right: 0; width: 420px;
+        border-left: 1px solid var(--border);
+        box-shadow: -4px 0 32px rgba(0,0,0,.4);
+      }
+    }
+  </style>
+</head>
+
+<body>
+<div class="app">
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="brand-icon">FX</div>
+      <div>
+        <div class="brand-text">FX Live</div>
+        <div class="brand-sub">Forex Market Rates</div>
+      </div>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
+      <span class="spin-icon" id="spinIcon">↻</span>
+      <span id="refreshLabel">Refresh</span>
+    </button>
+  </header>
+
+  <!-- ── Status ─────────────────────────────────────────── -->
+  <div class="status-bar">
+    <div><span class="live-dot" id="liveDot"></span><span id="statusTxt">Loading…</span></div>
+    <div id="countdownTxt"></div>
+  </div>
+
+  <!-- ── Search ─────────────────────────────────────────── -->
+  <div class="search-wrap">
+    <input class="search-input" id="searchInput" type="search"
+      placeholder="Search pairs, e.g. EUR, JPY, GBP…"
+      oninput="onSearch(this.value)"
+      autocomplete="off" spellcheck="false">
+  </div>
+
+  <!-- ── Main list ───────────────────────────────────────── -->
+  <main class="content" id="mainContent">
+    <div class="center-msg" id="initLoader">
+      <div class="loader"></div>
+      <span>Fetching live rates…</span>
+    </div>
+  </main>
+
+  <!-- ── Detail slide-over ──────────────────────────────── -->
+  <div class="detail" id="detail" role="dialog" aria-modal="true">
+    <div class="detail-header">
+      <button class="back-btn" onclick="closeDetail()" aria-label="Close">
+        ‹ Back
+      </button>
+      <div class="d-title">
+        <div class="d-pair" id="dPair">—</div>
+        <div class="d-full" id="dFull">—</div>
+      </div>
+      <div class="d-right">
+        <div class="d-rate" id="dRate">—</div>
+        <div class="d-chg"  id="dChg">—</div>
+      </div>
+    </div>
+
+    <div class="periods">
+      <button class="period-btn active" data-days="7"   onclick="setPeriod(this,7)">1W</button>
+      <button class="period-btn"        data-days="14"  onclick="setPeriod(this,14)">2W</button>
+      <button class="period-btn"        data-days="30"  onclick="setPeriod(this,30)">1M</button>
+      <button class="period-btn"        data-days="90"  onclick="setPeriod(this,90)">3M</button>
+      <button class="period-btn"        data-days="180" onclick="setPeriod(this,180)">6M</button>
+      <button class="period-btn"        data-days="365" onclick="setPeriod(this,365)">1Y</button>
+    </div>
+
+    <div class="chart-wrap">
+      <canvas id="mainChart"></canvas>
+      <div class="chart-loading" id="chartLoader" style="display:none">
+        <div class="loader"></div>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <div class="stats-grid" id="statsGrid"></div>
+      <div id="infoBlock"></div>
+    </div>
+  </div>
+
+</div><!-- .app -->
+
+<script>
+/* ============================================================
+   CONFIGURATION
+   ============================================================ */
+const CFG = {
+  REFRESH_SECS: 15 * 60,   // 15-minute auto-refresh
+  PAIRS: [
+    // Majors
+    { f:"EUR", t:"USD", fn:"Euro",             tn:"US Dollar",         ff:"🇪🇺", tf:"🇺🇸", cat:"Majors" },
+    { f:"GBP", t:"USD", fn:"British Pound",    tn:"US Dollar",         ff:"🇬🇧", tf:"🇺🇸", cat:"Majors" },
+    { f:"USD", t:"JPY", fn:"US Dollar",        tn:"Japanese Yen",      ff:"🇺🇸", tf:"🇯🇵", cat:"Majors" },
+    { f:"USD", t:"CHF", fn:"US Dollar",        tn:"Swiss Franc",       ff:"🇺🇸", tf:"🇨🇭", cat:"Majors" },
+    { f:"AUD", t:"USD", fn:"Australian Dollar",tn:"US Dollar",         ff:"🇦🇺", tf:"🇺🇸", cat:"Majors" },
+    { f:"USD", t:"CAD", fn:"US Dollar",        tn:"Canadian Dollar",   ff:"🇺🇸", tf:"🇨🇦", cat:"Majors" },
+    { f:"NZD", t:"USD", fn:"New Zealand Dollar",tn:"US Dollar",        ff:"🇳🇿", tf:"🇺🇸", cat:"Majors" },
+    // Euro Crosses
+    { f:"EUR", t:"GBP", fn:"Euro",             tn:"British Pound",     ff:"🇪🇺", tf:"🇬🇧", cat:"Euro Crosses" },
+    { f:"EUR", t:"JPY", fn:"Euro",             tn:"Japanese Yen",      ff:"🇪🇺", tf:"🇯🇵", cat:"Euro Crosses" },
+    { f:"EUR", t:"CHF", fn:"Euro",             tn:"Swiss Franc",       ff:"🇪🇺", tf:"🇨🇭", cat:"Euro Crosses" },
+    { f:"EUR", t:"CAD", fn:"Euro",             tn:"Canadian Dollar",   ff:"🇪🇺", tf:"🇨🇦", cat:"Euro Crosses" },
+    { f:"EUR", t:"AUD", fn:"Euro",             tn:"Australian Dollar", ff:"🇪🇺", tf:"🇦🇺", cat:"Euro Crosses" },
+    // Sterling Crosses
+    { f:"GBP", t:"JPY", fn:"British Pound",    tn:"Japanese Yen",      ff:"🇬🇧", tf:"🇯🇵", cat:"Sterling Crosses" },
+    { f:"GBP", t:"CHF", fn:"British Pound",    tn:"Swiss Franc",       ff:"🇬🇧", tf:"🇨🇭", cat:"Sterling Crosses" },
+    { f:"GBP", t:"AUD", fn:"British Pound",    tn:"Australian Dollar", ff:"🇬🇧", tf:"🇦🇺", cat:"Sterling Crosses" },
+    { f:"GBP", t:"CAD", fn:"British Pound",    tn:"Canadian Dollar",   ff:"🇬🇧", tf:"🇨🇦", cat:"Sterling Crosses" },
+    // Commodity / Pacific
+    { f:"AUD", t:"JPY", fn:"Australian Dollar",tn:"Japanese Yen",      ff:"🇦🇺", tf:"🇯🇵", cat:"Commodity Pairs" },
+    { f:"AUD", t:"NZD", fn:"Australian Dollar",tn:"New Zealand Dollar",ff:"🇦🇺", tf:"🇳🇿", cat:"Commodity Pairs" },
+    { f:"AUD", t:"CAD", fn:"Australian Dollar",tn:"Canadian Dollar",   ff:"🇦🇺", tf:"🇨🇦", cat:"Commodity Pairs" },
+    { f:"CAD", t:"JPY", fn:"Canadian Dollar",  tn:"Japanese Yen",      ff:"🇨🇦", tf:"🇯🇵", cat:"Commodity Pairs" },
+    // Emerging
+    { f:"USD", t:"CNY", fn:"US Dollar",        tn:"Chinese Yuan",      ff:"🇺🇸", tf:"🇨🇳", cat:"Emerging Markets" },
+    { f:"USD", t:"INR", fn:"US Dollar",        tn:"Indian Rupee",      ff:"🇺🇸", tf:"🇮🇳", cat:"Emerging Markets" },
+    { f:"USD", t:"MXN", fn:"US Dollar",        tn:"Mexican Peso",      ff:"🇺🇸", tf:"🇲🇽", cat:"Emerging Markets" },
+    { f:"USD", t:"BRL", fn:"US Dollar",        tn:"Brazilian Real",    ff:"🇺🇸", tf:"🇧🇷", cat:"Emerging Markets" },
+    { f:"USD", t:"SGD", fn:"US Dollar",        tn:"Singapore Dollar",  ff:"🇺🇸", tf:"🇸🇬", cat:"Emerging Markets" },
+    { f:"USD", t:"HKD", fn:"US Dollar",        tn:"Hong Kong Dollar",  ff:"🇺🇸", tf:"🇭🇰", cat:"Emerging Markets" },
+    { f:"USD", t:"NOK", fn:"US Dollar",        tn:"Norwegian Krone",   ff:"🇺🇸", tf:"🇳🇴", cat:"Emerging Markets" },
+    { f:"USD", t:"SEK", fn:"US Dollar",        tn:"Swedish Krona",     ff:"🇺🇸", tf:"🇸🇪", cat:"Emerging Markets" },
+  ],
+};
+
+/* ============================================================
+   STATE
+   ============================================================ */
+const S = {
+  rates:    {},   // USD-base rates from open.er-api
+  prevRates:{},   // Previous-close rates from Frankfurter (for 1D change)
+  histCache:{},   // { "EUR/USD/30": { data:[{date,rate}], ts } }
+  selected: null, // currently open pair config object
+  period:   7,    // chart period in days
+  chart:    null,
+  query:    "",
+  countdown: 0,
+  busy:     false,
+  lastTs:   null,
+};
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+
+// Given USD-base rates: A/B = rates[B] / rates[A]  (rates[USD] = 1)
+function calcRate(r, f, t) {
+  const rf = f === "USD" ? 1 : r[f];
+  const rt = t === "USD" ? 1 : r[t];
+  if (!rf || !rt) return null;
+  return rt / rf;
+}
+
+// Format a rate value with appropriate decimal places
+function fmt(rate, f, t) {
+  if (rate == null) return "—";
+  const isJPY = f === "JPY" || t === "JPY";
+  const isINR = f === "INR" || t === "INR";
+  const isLarge = rate >= 100;        // e.g. USD/JPY, USD/INR
+  if (isJPY || (isLarge && isINR)) return rate.toFixed(3);
+  if (isLarge) return rate.toFixed(4);
+  return rate.toFixed(5);
+}
+
+function fmtDate(dateStr, days) {
+  const d = new Date(dateStr + "T00:00:00");
+  if (days <= 30) return d.toLocaleDateString("en-US", { month:"short", day:"numeric" });
+  return d.toLocaleDateString("en-US", { month:"short", year:"2-digit" });
+}
+
+function isoDate(d) { return d.toISOString().slice(0,10); }
+
+/* ============================================================
+   API LAYER
+   ============================================================ */
+
+async function fetchCurrentRates() {
+  const res = await fetch("https://open.er-api.com/v6/latest/USD", { cache:"no-cache" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  if (j.result !== "success") throw new Error("API returned non-success");
+  return j.rates; // { EUR:0.9223, JPY:149.83, … }
+}
+
+// Fetch previous-close USD-base rates from Frankfurter (tries last 3 business days)
+async function fetchPrevClose() {
+  for (let d = 1; d <= 4; d++) {
+    const date = isoDate(new Date(Date.now() - d * 86400000));
+    try {
+      const res = await fetch(`https://api.frankfurter.app/${date}?from=USD`);
+      if (!res.ok) continue;
+      const j = await res.json();
+      if (j.rates) return { rates: j.rates, date };
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+// Fetch historical series for a pair via Frankfurter
+// Returns [{date, rate}] sorted ascending
+async function fetchHistorical(f, t, days) {
+  const key = `${f}/${t}/${days}`;
+  const cached = S.histCache[key];
+  if (cached && Date.now() - cached.ts < 3_600_000) return cached.data;
+
+  const end   = isoDate(new Date());
+  const start = isoDate(new Date(Date.now() - (days + 5) * 86400000));
+  const url   = `https://api.frankfurter.app/${start}..${end}?from=${f}&to=${t}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Frankfurter ${res.status}`);
+  const j = await res.json();
+
+  const data = Object.entries(j.rates)
+    .map(([date, r]) => ({ date, rate: r[t] }))
+    .filter(x => x.rate != null)
+    .sort((a, b) => a.date < b.date ? -1 : 1);
+
+  S.histCache[key] = { data, ts: Date.now() };
+  return data;
+}
+
+/* ============================================================
+   SPARKLINE (SVG)
+   ============================================================ */
+function sparklineSVG(data, up) {
+  if (!data || data.length < 2)
+    return `<svg class="sparkline" viewBox="0 0 80 28"><line x1="0" y1="14" x2="80" y2="14" stroke="#30363D" stroke-width="1"/></svg>`;
+
+  const vals = data.map(d => d.rate);
+  const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * 78 + 1;
+    const y = 25 - ((v - mn) / rng) * 22 + 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const col = up ? "#3FB950" : "#F85149";
+  return `<svg class="sparkline" viewBox="0 0 80 28" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.8"
+      stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>`;
+}
+
+/* ============================================================
+   RENDERING — MAIN LIST
+   ============================================================ */
+function renderList() {
+  const el = document.getElementById("mainContent");
+  const q  = S.query.toLowerCase();
+
+  const filtered = CFG.PAIRS.filter(p => {
+    if (!q) return true;
+    return (`${p.f}/${p.t}`.toLowerCase().includes(q) ||
+            p.fn.toLowerCase().includes(q) ||
+            p.tn.toLowerCase().includes(q));
+  });
+
+  if (!filtered.length) {
+    el.innerHTML = `<div class="center-msg"><span>No pairs match "<b>${S.query}</b>"</span></div>`;
+    return;
+  }
+
+  // Group by category
+  const groups = {};
+  filtered.forEach(p => (groups[p.cat] = groups[p.cat] || []).push(p));
+
+  let html = "";
+  for (const [cat, pairs] of Object.entries(groups)) {
+    html += `<div class="cat-head">${cat}</div><div class="pair-list">`;
+    for (const p of pairs) {
+      const key = `${p.f}/${p.t}`;
+      const rate = calcRate(S.rates, p.f, p.t);
+      const prev = S.prevRates[key];
+      const chgAbs  = (rate != null && prev != null) ? rate - prev : null;
+      const chgPct  = chgAbs != null ? (chgAbs / prev) * 100 : null;
+      const up = chgPct != null ? chgPct >= 0 : null;
+
+      const chgTxt = chgPct != null
+        ? `${up ? "+" : ""}${chgPct.toFixed(3)}%`
+        : "—";
+      const chgCls = up == null ? "" : (up ? "up" : "down");
+
+      const sparkKey = `${p.f}/${p.t}/7`;
+      const spark = S.histCache[sparkKey]?.data;
+
+      html += `
+        <div class="card" onclick="openDetail('${p.f}','${p.t}')">
+          <div class="card-left">
+            <span class="flags">${p.ff}${p.tf}</span>
+            <div>
+              <div class="pair-name">${key}</div>
+              <div class="pair-sub">${p.fn} / ${p.tn}</div>
+            </div>
+          </div>
+          <div class="card-right">
+            <div class="rate-val">${rate != null ? fmt(rate, p.f, p.t) : "—"}</div>
+            <div class="chg ${chgCls}">${chgTxt}</div>
+          </div>
+          <div class="card-bottom">
+            ${sparklineSVG(spark, up !== false)}
+          </div>
+        </div>`;
+    }
+    html += "</div>";
+  }
+
+  el.innerHTML = html;
+}
+
+/* ============================================================
+   DETAIL PANEL
+   ============================================================ */
+async function openDetail(f, t) {
+  const p = CFG.PAIRS.find(x => x.f === f && x.t === t);
+  if (!p) return;
+  S.selected = p;
+  S.period = 7;
+
+  // Populate header
+  const rate = calcRate(S.rates, f, t);
+  const prev = S.prevRates[`${f}/${t}`];
+  const chgAbs = (rate != null && prev != null) ? rate - prev : null;
+  const chgPct = chgAbs != null ? (chgAbs / prev) * 100 : null;
+  const up = chgPct != null ? chgPct >= 0 : null;
+
+  document.getElementById("dPair").textContent = `${f}/${t}`;
+  document.getElementById("dFull").textContent = `${p.fn} / ${p.tn}`;
+  document.getElementById("dRate").textContent = rate != null ? fmt(rate, f, t) : "—";
+
+  const dChg = document.getElementById("dChg");
+  if (chgPct != null) {
+    dChg.textContent = `${up ? "+" : ""}${fmt(chgAbs, f, t)} (${up ? "+" : ""}${chgPct.toFixed(3)}%)`;
+    dChg.className = `d-chg ${up ? "up" : "down"}`;
+  } else {
+    dChg.textContent = "—";
+    dChg.className = "d-chg";
+  }
+
+  // Reset period buttons
+  document.querySelectorAll(".period-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.days === "7"));
+
+  // Open panel
+  document.getElementById("detail").classList.add("open");
+  document.body.style.overflow = "hidden";
+
+  await loadChart(f, t, 7);
+}
+
+function closeDetail() {
+  document.getElementById("detail").classList.remove("open");
+  document.body.style.overflow = "";
+  if (S.chart) { S.chart.destroy(); S.chart = null; }
+  document.getElementById("statsGrid").innerHTML = "";
+  document.getElementById("infoBlock").innerHTML = "";
+}
+
+async function setPeriod(btn, days) {
+  document.querySelectorAll(".period-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  S.period = days;
+  if (S.selected) await loadChart(S.selected.f, S.selected.t, days);
+}
+
+async function loadChart(f, t, days) {
+  const canvas = document.getElementById("mainChart");
+  const loader = document.getElementById("chartLoader");
+  loader.style.display = "flex";
+  canvas.style.opacity = "0";
+
+  if (S.chart) { S.chart.destroy(); S.chart = null; }
+
+  let data;
+  try {
+    data = await fetchHistorical(f, t, days);
+  } catch {
+    data = null;
+  }
+
+  loader.style.display = "none";
+  canvas.style.opacity = "1";
+
+  if (!data || !data.length) {
+    document.getElementById("statsGrid").innerHTML =
+      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0">Chart data unavailable for this pair.</div>`;
+    document.getElementById("infoBlock").innerHTML = "";
+    return;
+  }
+
+  const vals   = data.map(d => d.rate);
+  const curRate = calcRate(S.rates, f, t);
+  const open   = vals[0];
+  const mn     = Math.min(...vals);
+  const mx     = Math.max(...vals);
+  const close  = curRate ?? vals[vals.length - 1];
+  const chg    = close - open;
+  const chgPct = (chg / open) * 100;
+  const up     = chg >= 0;
+
+  // Stats grid
+  document.getElementById("statsGrid").innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Period Open</div>
+      <div class="stat-val">${fmt(open, f, t)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Current / Close</div>
+      <div class="stat-val" style="color:var(--${up?"green":"red"})">${fmt(close, f, t)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Period Low</div>
+      <div class="stat-val" style="color:var(--red)">${fmt(mn, f, t)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Period High</div>
+      <div class="stat-val" style="color:var(--green)">${fmt(mx, f, t)}</div>
+    </div>
+  `;
+
+  // Info block
+  document.getElementById("infoBlock").innerHTML = `
+    <div class="info-block">
+      <div class="info-title">Period Summary — ${days}d</div>
+      <div class="info-row">
+        <span class="info-k">Change</span>
+        <span class="info-v" style="color:var(--${up?"green":"red"})">
+          ${up?"+":""}${fmt(chg, f, t)} (${up?"+":""}${chgPct.toFixed(3)}%)
+        </span>
+      </div>
+      <div class="info-row">
+        <span class="info-k">Range</span>
+        <span class="info-v">${fmt(mx - mn, f, t)}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-k">Data points</span>
+        <span class="info-v">${data.length} trading days</span>
+      </div>
+      <div class="info-row">
+        <span class="info-k">Rate source</span>
+        <span class="info-v" style="color:var(--txt3)">ECB / Frankfurter.app</span>
+      </div>
+      <div class="info-row">
+        <span class="info-k">Live rate source</span>
+        <span class="info-v" style="color:var(--txt3)">Open.er-api.com</span>
+      </div>
+    </div>
+  `;
+
+  // Build chart
+  const labels  = data.map(d => fmtDate(d.date, days));
+  const color   = up ? "#3FB950" : "#F85149";
+  const ctx     = canvas.getContext("2d");
+
+  S.chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        data: vals,
+        borderColor: color,
+        backgroundColor: color + "18",
+        fill: true,
+        tension: 0.25,
+        pointRadius: data.length > 90 ? 0 : (data.length > 30 ? 1 : 2),
+        pointHoverRadius: 4,
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#21262D",
+          borderColor: "#30363D",
+          borderWidth: 1,
+          titleColor: "#8B949E",
+          bodyColor: "#E6EDF3",
+          padding: 10,
+          callbacks: {
+            title: ctx => ctx[0].label,
+            label: ctx => ` ${fmt(ctx.raw, f, t)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "#21262D" },
+          ticks: { color: "#6E7681", maxTicksLimit: 6, maxRotation: 0, font: { size: 11 } },
+        },
+        y: {
+          position: "right",
+          grid: { color: "#21262D" },
+          ticks: {
+            color: "#6E7681",
+            font: { size: 11 },
+            callback: v => fmt(v, f, t),
+          },
+        },
+      },
+    },
+  });
+}
+
+/* ============================================================
+   SEARCH
+   ============================================================ */
+function onSearch(v) {
+  S.query = v.trim();
+  if (Object.keys(S.rates).length) renderList();
+}
+
+/* ============================================================
+   REFRESH ENGINE
+   ============================================================ */
+let _cdInterval = null;
+
+function startCountdown() {
+  S.countdown = CFG.REFRESH_SECS;
+  clearInterval(_cdInterval);
+  _cdInterval = setInterval(() => {
+    S.countdown--;
+    updateCountdown();
+    if (S.countdown <= 0) doRefresh();
+  }, 1000);
+}
+
+function updateCountdown() {
+  const m = Math.floor(S.countdown / 60);
+  const s = S.countdown % 60;
+  document.getElementById("countdownTxt").textContent =
+    `Next refresh: ${m}:${String(s).padStart(2,"0")}`;
+}
+
+function setStatus(txt, ok = true) {
+  document.getElementById("statusTxt").textContent = txt;
+  document.getElementById("liveDot").className = `live-dot${ok ? "" : " err"}`;
+}
+
+async function doRefresh() {
+  if (S.busy) return;
+  S.busy = true;
+  document.getElementById("spinIcon").classList.add("spinning");
+  setStatus("Updating…", true);
+
+  try {
+    // Parallel: current rates + previous close
+    const [currentRates, prevData] = await Promise.all([
+      fetchCurrentRates(),
+      fetchPrevClose(),
+    ]);
+
+    S.rates = currentRates;
+    S.lastTs = new Date();
+
+    // Build prevRates keyed as "F/T" from Frankfurter's USD-base response
+    if (prevData) {
+      S.prevRates = {};
+      CFG.PAIRS.forEach(p => {
+        // Frankfurter rates are USD-base: rates[EUR]=0.92 means 1 USD = 0.92 EUR
+        // So calcRate logic applies identically
+        const fxR = { ...prevData.rates, USD: 1 };
+        const v = calcRate(fxR, p.f, p.t);
+        if (v) S.prevRates[`${p.f}/${p.t}`] = v;
+      });
+    }
+
+    // Pre-fetch 7-day sparklines for all pairs (parallel, best-effort)
+    Promise.allSettled(
+      CFG.PAIRS.map(p => fetchHistorical(p.f, p.t, 7).catch(() => {}))
+    ).then(() => renderList()); // re-render with sparklines
+
+    renderList();
+    const ts = S.lastTs.toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" });
+    setStatus(`Updated ${ts}`, true);
+    startCountdown();
+
+    // Remove initial loader on first success
+    const loader = document.getElementById("initLoader");
+    if (loader) loader.remove();
+
+  } catch (err) {
+    console.error("Refresh failed:", err);
+    setStatus("Update failed — retrying…", false);
+
+    if (!Object.keys(S.rates).length) {
+      document.getElementById("mainContent").innerHTML = `
+        <div class="center-msg">
+          <div class="err-title">Unable to load rates</div>
+          <span>Check your internet connection</span>
+          <button class="retry-btn" onclick="manualRefresh()">Retry</button>
+        </div>`;
+    }
+    // Retry sooner on failure
+    S.countdown = 30;
+    startCountdown();
+  } finally {
+    S.busy = false;
+    document.getElementById("spinIcon").classList.remove("spinning");
+  }
+}
+
+function manualRefresh() {
+  clearInterval(_cdInterval);
+  S.prevRates = {}; // clear prev so first refresh sets baseline
+  doRefresh();
+}
+
+/* ============================================================
+   SWIPE-TO-CLOSE DETAIL (touch)
+   ============================================================ */
+let _touchX = 0;
+const detailEl = document.getElementById("detail");
+detailEl.addEventListener("touchstart", e => { _touchX = e.touches[0].clientX; }, { passive:true });
+detailEl.addEventListener("touchend", e => {
+  if (e.changedTouches[0].clientX - _touchX > 70) closeDetail();
+}, { passive:true });
+
+/* ============================================================
+   KEYBOARD
+   ============================================================ */
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeDetail();
+});
+
+/* ============================================================
+   ONLINE / OFFLINE
+   ============================================================ */
+window.addEventListener("online",  () => { setStatus("Back online, refreshing…"); doRefresh(); });
+window.addEventListener("offline", () => setStatus("Offline — showing cached rates", false));
+
+/* ============================================================
+   VISIBILITY — refresh if stale when tab regains focus
+   ============================================================ */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.countdown <= 0) doRefresh();
+});
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+doRefresh();
+</script>
+</body>
+</html>
