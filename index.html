@@ -66,6 +66,7 @@
     .brand-text { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
     .brand-sub  { font-size: 10px; color: var(--txt3); margin-top: 1px; }
 
+    .header-actions { display: flex; gap: 6px; align-items: center; }
     .refresh-btn {
       background: none;
       border: 1px solid var(--border);
@@ -77,6 +78,17 @@
       transition: background 0.15s;
     }
     .refresh-btn:active { background: var(--bg2); }
+    .icon-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--txt2);
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .icon-btn:active { background: var(--bg2); color: var(--txt1); }
     .spin-icon { display: inline-block; font-size: 15px; transition: transform 0.3s; }
     .spin-icon.spinning { animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -243,10 +255,10 @@
     .d-chg.up   { color: var(--green); }
     .d-chg.down { color: var(--red); }
 
-    /* Period tabs */
+    /* Period/Interval tabs */
     .periods {
       flex-shrink: 0;
-      display: flex; gap: 6px;
+      display: flex; gap: 5px;
       padding: 8px 14px;
       background: var(--bg1);
       border-bottom: 1px solid var(--border);
@@ -255,9 +267,10 @@
     .periods::-webkit-scrollbar { display: none; }
     .period-btn {
       background: none; border: 1px solid var(--border);
-      color: var(--txt2); padding: 5px 13px;
-      border-radius: 6px; font-size: 13px; font-weight: 500;
+      color: var(--txt2); padding: 5px 11px;
+      border-radius: 6px; font-size: 12px; font-weight: 500;
       white-space: nowrap; transition: all 0.12s;
+      flex-shrink: 0;
     }
     .period-btn.active {
       background: var(--blue); border-color: var(--blue); color: #fff;
@@ -317,6 +330,57 @@
       padding-bottom: calc(12px + var(--safe-bottom));
     }
 
+    /* ── Settings Modal ────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.65);
+      z-index: 600;
+      display: flex; align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .modal {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      width: 100%; max-width: 380px;
+    }
+    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+    .modal-desc  { color: var(--txt2); font-size: 13px; margin-bottom: 14px; line-height: 1.5; }
+    .modal-link  { color: var(--blue); text-decoration: none; }
+    .modal-input {
+      width: 100%;
+      background: var(--bg0);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: var(--txt1);
+      font-size: 13px;
+      outline: none;
+      margin-bottom: 12px;
+      font-family: monospace;
+      letter-spacing: 0.5px;
+    }
+    .modal-input:focus { border-color: var(--blue); }
+    .modal-input::placeholder { color: var(--txt3); letter-spacing: 0; }
+    .modal-actions { display: flex; gap: 8px; }
+    .modal-actions button { flex: 1; padding: 9px; border-radius: 8px; font-size: 14px; font-weight: 500; border: none; }
+    .modal-save   { background: var(--blue); color: #fff; }
+    .modal-cancel { background: var(--bg2); color: var(--txt2); border: 1px solid var(--border) !important; }
+    .api-key-notice {
+      margin: 0 14px 14px;
+      background: rgba(88,166,255,0.08);
+      border: 1px solid rgba(88,166,255,0.25);
+      border-radius: 9px; padding: 12px;
+      font-size: 13px; color: var(--txt2);
+      text-align: center; line-height: 1.5;
+    }
+    .api-key-notice button {
+      margin-top: 8px;
+      background: var(--blue); border: none; color: #fff;
+      padding: 8px 18px; border-radius: 7px; font-size: 13px;
+    }
+
     /* ── Responsive: wider screens ─────────────────────────── */
     @media (min-width: 640px) {
       .pair-list { display: grid; grid-template-columns: repeat(2,1fr); gap: 7px; }
@@ -345,10 +409,13 @@
         <div class="brand-sub">Forex Market Rates</div>
       </div>
     </div>
-    <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
-      <span class="spin-icon" id="spinIcon">↻</span>
-      <span id="refreshLabel">Refresh</span>
-    </button>
+    <div class="header-actions">
+      <button class="icon-btn" title="SerpAPI Settings" onclick="openSettings()">⚙</button>
+      <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
+        <span class="spin-icon" id="spinIcon">↻</span>
+        <span id="refreshLabel">Refresh</span>
+      </button>
+    </div>
   </header>
 
   <!-- ── Status ─────────────────────────────────────────── -->
@@ -389,13 +456,17 @@
       </div>
     </div>
 
+    <!-- Time interval buttons -->
     <div class="periods">
-      <button class="period-btn active" data-days="7"   onclick="setPeriod(this,7)">1W</button>
-      <button class="period-btn"        data-days="14"  onclick="setPeriod(this,14)">2W</button>
-      <button class="period-btn"        data-days="30"  onclick="setPeriod(this,30)">1M</button>
-      <button class="period-btn"        data-days="90"  onclick="setPeriod(this,90)">3M</button>
-      <button class="period-btn"        data-days="180" onclick="setPeriod(this,180)">6M</button>
-      <button class="period-btn"        data-days="365" onclick="setPeriod(this,365)">1Y</button>
+      <button class="period-btn active" data-iv="1m"  onclick="setChartInterval(this,'1m')">1m</button>
+      <button class="period-btn"        data-iv="5m"  onclick="setChartInterval(this,'5m')">5m</button>
+      <button class="period-btn"        data-iv="15m" onclick="setChartInterval(this,'15m')">15m</button>
+      <button class="period-btn"        data-iv="30m" onclick="setChartInterval(this,'30m')">30m</button>
+      <button class="period-btn"        data-iv="1h"  onclick="setChartInterval(this,'1h')">1h</button>
+      <button class="period-btn"        data-iv="2h"  onclick="setChartInterval(this,'2h')">2h</button>
+      <button class="period-btn"        data-iv="4h"  onclick="setChartInterval(this,'4h')">4h</button>
+      <button class="period-btn"        data-iv="1D"  onclick="setChartInterval(this,'1D')">1D</button>
+      <button class="period-btn"        data-iv="1W"  onclick="setChartInterval(this,'1W')">1W</button>
     </div>
 
     <div class="chart-wrap">
@@ -411,6 +482,24 @@
     </div>
   </div>
 
+  <!-- ── Settings Modal ─────────────────────────────────── -->
+  <div class="modal-overlay" id="settingsModal" style="display:none" onclick="handleOverlayClick(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-title">SerpAPI Configuration</div>
+      <div class="modal-desc">
+        Enter your SerpAPI key to enable intraday chart data via Google Finance.
+        Get a free key at <a class="modal-link" href="https://serpapi.com/" target="_blank" rel="noopener">serpapi.com</a>.
+      </div>
+      <input class="modal-input" id="apiKeyInput" type="password"
+        placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        autocomplete="off" spellcheck="false">
+      <div class="modal-actions">
+        <button class="modal-save" onclick="saveSettings()">Save Key</button>
+        <button class="modal-cancel" onclick="closeSettings()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
 </div><!-- .app -->
 
 <script>
@@ -418,7 +507,8 @@
    CONFIGURATION
    ============================================================ */
 const CFG = {
-  REFRESH_SECS: 15 * 60,   // 15-minute auto-refresh
+  REFRESH_SECS: 15 * 60,
+  SERPAPI_KEY: localStorage.getItem('serpapi_key') || '',
   PAIRS: [
     // Majors
     { f:"EUR", t:"USD", fn:"Euro",             tn:"US Dollar",         ff:"🇪🇺", tf:"🇺🇸", cat:"Majors" },
@@ -457,26 +547,53 @@ const CFG = {
 };
 
 /* ============================================================
+   INTERVAL → SERPAPI WINDOW MAPPING
+   ============================================================ */
+const INTERVAL_CONFIG = {
+  "1m":  { serpWindow: "1D",  groupMins: 1     },
+  "5m":  { serpWindow: "1D",  groupMins: 5     },
+  "15m": { serpWindow: "1D",  groupMins: 15    },
+  "30m": { serpWindow: "1D",  groupMins: 30    },
+  "1h":  { serpWindow: "5D",  groupMins: 60    },
+  "2h":  { serpWindow: "5D",  groupMins: 120   },
+  "4h":  { serpWindow: "1M",  groupMins: 240   },
+  "1D":  { serpWindow: "1Y",  groupMins: 1440  },
+  "1W":  { serpWindow: "5Y",  groupMins: 10080 },
+};
+
+const INTERVAL_LABELS = {
+  "1m":"1 Minute", "5m":"5 Minute", "15m":"15 Minute", "30m":"30 Minute",
+  "1h":"1 Hour", "2h":"2 Hour", "4h":"4 Hour", "1D":"Daily", "1W":"Weekly",
+};
+
+// Cache TTL in ms per interval
+const CACHE_TTL = {
+  "1m":60_000, "5m":120_000, "15m":300_000, "30m":300_000,
+  "1h":600_000, "2h":900_000, "4h":900_000, "1D":3_600_000, "1W":3_600_000,
+};
+
+/* ============================================================
    STATE
    ============================================================ */
 const S = {
-  rates:    {},   // USD-base rates from open.er-api
-  prevRates:{},   // Previous-close rates from Frankfurter (for 1D change)
-  histCache:{},   // { "EUR/USD/30": { data:[{date,rate}], ts } }
-  selected: null, // currently open pair config object
-  period:   7,    // chart period in days
-  chart:    null,
-  query:    "",
+  rates:     {},    // USD-base rates from open.er-api
+  prevRates: {},    // Previous-close rates from Frankfurter
+  histCache: {},    // Frankfurter sparkline cache
+  chartCache:{},    // SerpAPI chart data cache
+  selected:  null,  // currently open pair config object
+  interval:  "1m",  // current chart interval
+  chart:     null,
+  query:     "",
   countdown: 0,
-  busy:     false,
-  lastTs:   null,
+  busy:      false,
+  lastTs:    null,
 };
 
 /* ============================================================
    UTILITIES
    ============================================================ */
 
-// Given USD-base rates: A/B = rates[B] / rates[A]  (rates[USD] = 1)
+// Given USD-base rates: A/B = rates[B] / rates[A]
 function calcRate(r, f, t) {
   const rf = f === "USD" ? 1 : r[f];
   const rt = t === "USD" ? 1 : r[t];
@@ -489,33 +606,127 @@ function fmt(rate, f, t) {
   if (rate == null) return "—";
   const isJPY = f === "JPY" || t === "JPY";
   const isINR = f === "INR" || t === "INR";
-  const isLarge = rate >= 100;        // e.g. USD/JPY, USD/INR
+  const isLarge = rate >= 100;
   if (isJPY || (isLarge && isINR)) return rate.toFixed(3);
   if (isLarge) return rate.toFixed(4);
   return rate.toFixed(5);
 }
 
-function fmtDate(dateStr, days) {
-  const d = new Date(dateStr + "T00:00:00");
-  if (days <= 30) return d.toLocaleDateString("en-US", { month:"short", day:"numeric" });
-  return d.toLocaleDateString("en-US", { month:"short", year:"2-digit" });
-}
-
 function isoDate(d) { return d.toISOString().slice(0,10); }
 
 /* ============================================================
-   API LAYER
+   SERPAPI DATE PARSING
    ============================================================ */
+function parseSerpDate(dateStr) {
+  // "Feb 24 2026, 09:30 AM UTC-05:00" → parse to UTC ms
+  const m = dateStr.match(/(\w{3})\s+(\d+)\s+(\d+),\s+(\d+):(\d+)\s+(AM|PM)\s+UTC([+-])(\d+):(\d+)/);
+  if (m) {
+    const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+    const [,mon,day,yr,hr,min,ampm,sign,tzH,tzM] = m;
+    let h = parseInt(hr, 10);
+    if (ampm === 'PM' && h !== 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+    const tzOffset = (parseInt(tzH, 10) * 60 + parseInt(tzM, 10)) * (sign === '-' ? -1 : 1);
+    return Date.UTC(parseInt(yr,10), MONTHS[mon], parseInt(day,10), h, parseInt(min,10)) - tzOffset * 60_000;
+  }
+  // Fallback
+  return new Date(dateStr.replace(/\bUTC([+-])/, 'GMT$1')).getTime();
+}
 
+/* ============================================================
+   DATA AGGREGATION
+   ============================================================ */
+function aggregateData(rawPoints, groupMins) {
+  if (groupMins <= 1) {
+    return rawPoints.map(p => ({ ts: p.ts, rate: p.price, open: p.price, high: p.price, low: p.price }));
+  }
+
+  const groupMs = groupMins * 60_000;
+  const buckets = new Map();
+
+  rawPoints.forEach(p => {
+    const bts = Math.floor(p.ts / groupMs) * groupMs;
+    if (!buckets.has(bts)) {
+      buckets.set(bts, { ts: bts, open: p.price, high: p.price, low: p.price, close: p.price });
+    } else {
+      const b = buckets.get(bts);
+      if (p.price > b.high) b.high = p.price;
+      if (p.price < b.low)  b.low  = p.price;
+      b.close = p.price;
+    }
+  });
+
+  return Array.from(buckets.values())
+    .sort((a, b) => a.ts - b.ts)
+    .map(b => ({ ts: b.ts, rate: b.close, open: b.open, high: b.high, low: b.low }));
+}
+
+/* ============================================================
+   CHART LABEL FORMATTER
+   ============================================================ */
+function fmtChartLabel(ts, interval) {
+  const d = new Date(ts);
+  if (['1m','5m','15m','30m'].includes(interval)) {
+    return d.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit', hour12: false });
+  }
+  if (['1h','2h','4h'].includes(interval)) {
+    const date = d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+    const time = d.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit', hour12: false });
+    return `${date} ${time}`;
+  }
+  if (interval === '1D') return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  // 1W
+  return d.toLocaleDateString('en-US', { month:'short', year:'2-digit' });
+}
+
+/* ============================================================
+   SERPAPI — CHART DATA
+   ============================================================ */
+async function fetchSerpAPIChart(f, t, interval) {
+  if (!CFG.SERPAPI_KEY) throw new Error("NO_API_KEY");
+
+  const cacheKey = `${f}/${t}/${interval}`;
+  const cached   = S.chartCache[cacheKey];
+  const ttl      = CACHE_TTL[interval] || 300_000;
+  if (cached && Date.now() - cached.ts < ttl) return cached.data;
+
+  const { serpWindow, groupMins } = INTERVAL_CONFIG[interval];
+  const q   = `${f}-${t}`;
+  const url = `https://serpapi.com/search.json?engine=google_finance`
+            + `&q=${encodeURIComponent(q)}`
+            + `&window=${serpWindow}`
+            + `&api_key=${encodeURIComponent(CFG.SERPAPI_KEY)}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`SerpAPI HTTP ${res.status}`);
+  const j = await res.json();
+  if (j.error) throw new Error(j.error);
+  if (!j.graph || !j.graph.length) throw new Error("No chart data returned");
+
+  // Parse raw 1-minute points from API
+  const rawPoints = j.graph
+    .map(pt => ({ ts: parseSerpDate(pt.date), price: pt.price }))
+    .filter(p => !isNaN(p.ts) && p.price != null);
+
+  if (!rawPoints.length) throw new Error("Could not parse chart data");
+
+  const data = aggregateData(rawPoints, groupMins);
+  S.chartCache[cacheKey] = { data, ts: Date.now() };
+  return data;
+}
+
+/* ============================================================
+   API LAYER — CURRENT RATES (open.er-api)
+   ============================================================ */
 async function fetchCurrentRates() {
   const res = await fetch("https://open.er-api.com/v6/latest/USD", { cache:"no-cache" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const j = await res.json();
   if (j.result !== "success") throw new Error("API returned non-success");
-  return j.rates; // { EUR:0.9223, JPY:149.83, … }
+  return j.rates;
 }
 
-// Fetch previous-close USD-base rates from Frankfurter (tries last 3 business days)
+// Fetch previous-close rates from Frankfurter (for 1D % change on cards)
 async function fetchPrevClose() {
   for (let d = 1; d <= 4; d++) {
     const date = isoDate(new Date(Date.now() - d * 86400000));
@@ -529,8 +740,7 @@ async function fetchPrevClose() {
   return null;
 }
 
-// Fetch historical series for a pair via Frankfurter
-// Returns [{date, rate}] sorted ascending
+// Fetch 7-day historical series for sparklines (Frankfurter)
 async function fetchHistorical(f, t, days) {
   const key = `${f}/${t}/${days}`;
   const cached = S.histCache[key];
@@ -593,7 +803,6 @@ function renderList() {
     return;
   }
 
-  // Group by category
   const groups = {};
   filtered.forEach(p => (groups[p.cat] = groups[p.cat] || []).push(p));
 
@@ -604,17 +813,14 @@ function renderList() {
       const key = `${p.f}/${p.t}`;
       const rate = calcRate(S.rates, p.f, p.t);
       const prev = S.prevRates[key];
-      const chgAbs  = (rate != null && prev != null) ? rate - prev : null;
-      const chgPct  = chgAbs != null ? (chgAbs / prev) * 100 : null;
+      const chgAbs = (rate != null && prev != null) ? rate - prev : null;
+      const chgPct = chgAbs != null ? (chgAbs / prev) * 100 : null;
       const up = chgPct != null ? chgPct >= 0 : null;
 
-      const chgTxt = chgPct != null
-        ? `${up ? "+" : ""}${chgPct.toFixed(3)}%`
-        : "—";
+      const chgTxt = chgPct != null ? `${up ? "+" : ""}${chgPct.toFixed(3)}%` : "—";
       const chgCls = up == null ? "" : (up ? "up" : "down");
 
-      const sparkKey = `${p.f}/${p.t}/7`;
-      const spark = S.histCache[sparkKey]?.data;
+      const spark = S.histCache[`${p.f}/${p.t}/7`]?.data;
 
       html += `
         <div class="card" onclick="openDetail('${p.f}','${p.t}')">
@@ -647,9 +853,9 @@ async function openDetail(f, t) {
   const p = CFG.PAIRS.find(x => x.f === f && x.t === t);
   if (!p) return;
   S.selected = p;
-  S.period = 7;
+  S.interval = "1m";
 
-  // Populate header
+  // Populate header from cached rates
   const rate = calcRate(S.rates, f, t);
   const prev = S.prevRates[`${f}/${t}`];
   const chgAbs = (rate != null && prev != null) ? rate - prev : null;
@@ -669,15 +875,15 @@ async function openDetail(f, t) {
     dChg.className = "d-chg";
   }
 
-  // Reset period buttons
+  // Reset interval buttons
   document.querySelectorAll(".period-btn").forEach(b =>
-    b.classList.toggle("active", b.dataset.days === "7"));
+    b.classList.toggle("active", b.dataset.iv === "1m"));
 
   // Open panel
   document.getElementById("detail").classList.add("open");
   document.body.style.overflow = "hidden";
 
-  await loadChart(f, t, 7);
+  await loadChart(f, t, "1m");
 }
 
 function closeDetail() {
@@ -688,14 +894,17 @@ function closeDetail() {
   document.getElementById("infoBlock").innerHTML = "";
 }
 
-async function setPeriod(btn, days) {
+async function setChartInterval(btn, interval) {
   document.querySelectorAll(".period-btn").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
-  S.period = days;
-  if (S.selected) await loadChart(S.selected.f, S.selected.t, days);
+  S.interval = interval;
+  if (S.selected) await loadChart(S.selected.f, S.selected.t, interval);
 }
 
-async function loadChart(f, t, days) {
+/* ============================================================
+   CHART LOADING (SerpAPI)
+   ============================================================ */
+async function loadChart(f, t, interval) {
   const canvas = document.getElementById("mainChart");
   const loader = document.getElementById("chartLoader");
   loader.style.display = "flex";
@@ -705,9 +914,27 @@ async function loadChart(f, t, days) {
 
   let data;
   try {
-    data = await fetchHistorical(f, t, days);
-  } catch {
-    data = null;
+    data = await fetchSerpAPIChart(f, t, interval);
+  } catch (err) {
+    loader.style.display = "none";
+    canvas.style.opacity = "1";
+
+    // Handle missing API key gracefully
+    if (err.message === "NO_API_KEY") {
+      document.getElementById("statsGrid").innerHTML = "";
+      document.getElementById("infoBlock").innerHTML = `
+        <div class="api-key-notice">
+          Add your SerpAPI key to view intraday charts<br>with real Google Finance data.
+          <br><button onclick="openSettings()">⚙ Configure API Key</button>
+        </div>`;
+    } else {
+      document.getElementById("statsGrid").innerHTML =
+        `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0;text-align:center">
+          Chart data unavailable for this pair / interval.
+        </div>`;
+      document.getElementById("infoBlock").innerHTML = "";
+    }
+    return;
   }
 
   loader.style.display = "none";
@@ -715,37 +942,36 @@ async function loadChart(f, t, days) {
 
   if (!data || !data.length) {
     document.getElementById("statsGrid").innerHTML =
-      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0">Chart data unavailable for this pair.</div>`;
+      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0">No data for this interval.</div>`;
     document.getElementById("infoBlock").innerHTML = "";
     return;
   }
 
-  const vals   = data.map(d => d.rate);
-  const curRate = calcRate(S.rates, f, t);
-  const open   = vals[0];
-  const mn     = Math.min(...vals);
-  const mx     = Math.max(...vals);
-  const close  = curRate ?? vals[vals.length - 1];
-  const chg    = close - open;
+  const vals  = data.map(d => d.rate);
+  const open  = data[0].open  ?? vals[0];
+  const close = vals[vals.length - 1];
+  const mn    = Math.min(...data.map(d => d.low  ?? d.rate));
+  const mx    = Math.max(...data.map(d => d.high ?? d.rate));
+  const chg   = close - open;
   const chgPct = (chg / open) * 100;
-  const up     = chg >= 0;
+  const up    = chg >= 0;
 
   // Stats grid
   document.getElementById("statsGrid").innerHTML = `
     <div class="stat-card">
-      <div class="stat-label">Period Open</div>
+      <div class="stat-label">Open</div>
       <div class="stat-val">${fmt(open, f, t)}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Current / Close</div>
+      <div class="stat-label">Close</div>
       <div class="stat-val" style="color:var(--${up?"green":"red"})">${fmt(close, f, t)}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period Low</div>
+      <div class="stat-label">Low</div>
       <div class="stat-val" style="color:var(--red)">${fmt(mn, f, t)}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period High</div>
+      <div class="stat-label">High</div>
       <div class="stat-val" style="color:var(--green)">${fmt(mx, f, t)}</div>
     </div>
   `;
@@ -753,7 +979,7 @@ async function loadChart(f, t, days) {
   // Info block
   document.getElementById("infoBlock").innerHTML = `
     <div class="info-block">
-      <div class="info-title">Period Summary — ${days}d</div>
+      <div class="info-title">${INTERVAL_LABELS[interval] || interval} Chart — ${f}/${t}</div>
       <div class="info-row">
         <span class="info-k">Change</span>
         <span class="info-v" style="color:var(--${up?"green":"red"})">
@@ -765,24 +991,20 @@ async function loadChart(f, t, days) {
         <span class="info-v">${fmt(mx - mn, f, t)}</span>
       </div>
       <div class="info-row">
-        <span class="info-k">Data points</span>
-        <span class="info-v">${data.length} trading days</span>
+        <span class="info-k">Candles</span>
+        <span class="info-v">${data.length}</span>
       </div>
       <div class="info-row">
-        <span class="info-k">Rate source</span>
-        <span class="info-v" style="color:var(--txt3)">ECB / Frankfurter.app</span>
-      </div>
-      <div class="info-row">
-        <span class="info-k">Live rate source</span>
-        <span class="info-v" style="color:var(--txt3)">Open.er-api.com</span>
+        <span class="info-k">Source</span>
+        <span class="info-v" style="color:var(--txt3)">Google Finance via SerpAPI</span>
       </div>
     </div>
   `;
 
   // Build chart
-  const labels  = data.map(d => fmtDate(d.date, days));
-  const color   = up ? "#3FB950" : "#F85149";
-  const ctx     = canvas.getContext("2d");
+  const labels = data.map(d => fmtChartLabel(d.ts, interval));
+  const color  = up ? "#3FB950" : "#F85149";
+  const ctx    = canvas.getContext("2d");
 
   S.chart = new Chart(ctx, {
     type: "line",
@@ -794,7 +1016,7 @@ async function loadChart(f, t, days) {
         backgroundColor: color + "18",
         fill: true,
         tension: 0.25,
-        pointRadius: data.length > 90 ? 0 : (data.length > 30 ? 1 : 2),
+        pointRadius: data.length > 200 ? 0 : (data.length > 60 ? 1 : 2),
         pointHoverRadius: 4,
         borderWidth: 2,
       }],
@@ -835,6 +1057,40 @@ async function loadChart(f, t, days) {
       },
     },
   });
+}
+
+/* ============================================================
+   SETTINGS MODAL
+   ============================================================ */
+function openSettings() {
+  document.getElementById("apiKeyInput").value = CFG.SERPAPI_KEY;
+  document.getElementById("settingsModal").style.display = "flex";
+  setTimeout(() => document.getElementById("apiKeyInput").focus(), 50);
+}
+
+function closeSettings() {
+  document.getElementById("settingsModal").style.display = "none";
+}
+
+function handleOverlayClick(e) {
+  if (e.target === e.currentTarget) closeSettings();
+}
+
+function saveSettings() {
+  const key = document.getElementById("apiKeyInput").value.trim();
+  CFG.SERPAPI_KEY = key;
+  if (key) {
+    localStorage.setItem('serpapi_key', key);
+  } else {
+    localStorage.removeItem('serpapi_key');
+  }
+  // Clear chart cache so next load fetches fresh with new key
+  S.chartCache = {};
+  closeSettings();
+  // Reload chart if detail is open
+  if (S.selected && document.getElementById("detail").classList.contains("open")) {
+    loadChart(S.selected.f, S.selected.t, S.interval);
+  }
 }
 
 /* ============================================================
@@ -879,7 +1135,6 @@ async function doRefresh() {
   setStatus("Updating…", true);
 
   try {
-    // Parallel: current rates + previous close
     const [currentRates, prevData] = await Promise.all([
       fetchCurrentRates(),
       fetchPrevClose(),
@@ -888,29 +1143,25 @@ async function doRefresh() {
     S.rates = currentRates;
     S.lastTs = new Date();
 
-    // Build prevRates keyed as "F/T" from Frankfurter's USD-base response
     if (prevData) {
       S.prevRates = {};
       CFG.PAIRS.forEach(p => {
-        // Frankfurter rates are USD-base: rates[EUR]=0.92 means 1 USD = 0.92 EUR
-        // So calcRate logic applies identically
         const fxR = { ...prevData.rates, USD: 1 };
         const v = calcRate(fxR, p.f, p.t);
         if (v) S.prevRates[`${p.f}/${p.t}`] = v;
       });
     }
 
-    // Pre-fetch 7-day sparklines for all pairs (parallel, best-effort)
+    // Pre-fetch 7-day sparklines (best-effort, parallel)
     Promise.allSettled(
       CFG.PAIRS.map(p => fetchHistorical(p.f, p.t, 7).catch(() => {}))
-    ).then(() => renderList()); // re-render with sparklines
+    ).then(() => renderList());
 
     renderList();
     const ts = S.lastTs.toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" });
     setStatus(`Updated ${ts}`, true);
     startCountdown();
 
-    // Remove initial loader on first success
     const loader = document.getElementById("initLoader");
     if (loader) loader.remove();
 
@@ -926,7 +1177,6 @@ async function doRefresh() {
           <button class="retry-btn" onclick="manualRefresh()">Retry</button>
         </div>`;
     }
-    // Retry sooner on failure
     S.countdown = 30;
     startCountdown();
   } finally {
@@ -937,7 +1187,7 @@ async function doRefresh() {
 
 function manualRefresh() {
   clearInterval(_cdInterval);
-  S.prevRates = {}; // clear prev so first refresh sets baseline
+  S.prevRates = {};
   doRefresh();
 }
 
@@ -955,7 +1205,10 @@ detailEl.addEventListener("touchend", e => {
    KEYBOARD
    ============================================================ */
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") closeDetail();
+  if (e.key === "Escape") {
+    closeSettings();
+    closeDetail();
+  }
 });
 
 /* ============================================================
