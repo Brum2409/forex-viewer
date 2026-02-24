@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<!-- Run this file locally once to generate icon PNGs, then delete it -->
+<html><body>
+<canvas id="c192" width="192" height="192"></canvas>
+<canvas id="c512" width="512" height="512"></canvas>
+<script>
+function draw(id, size) {
+  const c = document.getElementById(id);
+  const ctx = c.getContext("2d");
+  const r = size * 0.15;
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, "#1f6feb");
+  grad.addColorStop(1, "#58a6ff");
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(size - r, 0);
+  ctx.arcTo(size, 0, size, r, r);
+  ctx.lineTo(size, size - r);
+  ctx.arcTo(size, size, size - r, size, r);
+  ctx.lineTo(r, size);
+  ctx.arcTo(0, size, 0, size - r, r);
+  ctx.lineTo(0, r);
+  ctx.arcTo(0, 0, r, 0, r);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  // Text
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `bold ${size * 0.38}px -apple-system, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("FX", size / 2, size / 2);
+  return c.toDataURL("image/png");
+}
+draw("c192", 192);
+draw("c512", 512);
+// Download links
+["192","512"].forEach(s => {
+  const a = document.createElement("a");
+  a.href = document.getElementById(`c${s}`).toDataURL("image/png");
+  a.download = `icon-${s}.png`;
+  a.textContent = `Download icon-${s}.png`;
+  a.style.display = "block";
+  document.body.appendChild(a);
+});
+</script>
+</body></html>
