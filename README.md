@@ -1,6 +1,6 @@
 # FX Live — Forex Viewer
 
-A mobile-first live forex exchange rate viewer hosted on GitHub Pages.
+A mobile-first live forex exchange rate viewer hosted on GitHub Pages. : https://brum2409.github.io/forex-viewer/
 
 ## Features
 
