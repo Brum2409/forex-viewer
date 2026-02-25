@@ -691,12 +691,15 @@ const CFG = {
    ============================================================ */
 const INTERVAL_CONFIG = {
   "1m":  { avInterval: "1min",  groupMins: 1     },
+  // 5m–4h all share one "5min" outputsize=full fetch (≈8 640 bars, 30 days).
+  // Switching between any of these 6 intervals costs 0 extra API calls after
+  // the first fetch, keeping usage well within the 5 req/min free-tier limit.
   "5m":  { avInterval: "5min",  groupMins: 5     },
-  "15m": { avInterval: "15min", groupMins: 15    },
-  "30m": { avInterval: "30min", groupMins: 30    },
-  "1h":  { avInterval: "60min", groupMins: 60    },
-  "2h":  { avInterval: "60min", groupMins: 120   },
-  "4h":  { avInterval: "60min", groupMins: 240   },
+  "15m": { avInterval: "5min",  groupMins: 15    },
+  "30m": { avInterval: "5min",  groupMins: 30    },
+  "1h":  { avInterval: "5min",  groupMins: 60    },
+  "2h":  { avInterval: "5min",  groupMins: 120   },
+  "4h":  { avInterval: "5min",  groupMins: 240   },
   "1D":  { avInterval: null,    groupMins: 1440  },
   "1W":  { avInterval: null,    groupMins: 10080 },
 };
@@ -788,7 +791,10 @@ function _avDrain() {
    ============================================================ */
 function aggregateData(rawPoints, groupMins) {
   if (groupMins <= 1) {
-    return rawPoints.map(p => ({ ts: p.ts, rate: p.price, open: p.price, high: p.price, low: p.price }));
+    return rawPoints.map(p => ({
+      ts: p.ts, rate: p.price,
+      open: p.open ?? p.price, high: p.high ?? p.price, low: p.low ?? p.price,
+    }));
   }
 
   const groupMs = groupMins * 60_000;
@@ -796,12 +802,17 @@ function aggregateData(rawPoints, groupMins) {
 
   rawPoints.forEach(p => {
     const bts = Math.floor(p.ts / groupMs) * groupMs;
+    // Use actual OHLC fields when available (e.g. 5min source bars); fall
+    // back to close price for sources that only carry a single price value
+    // (e.g. Frankfurter daily data used for 1W candles).
+    const hi = p.high ?? p.price;
+    const lo = p.low  ?? p.price;
     if (!buckets.has(bts)) {
-      buckets.set(bts, { ts: bts, open: p.price, high: p.price, low: p.price, close: p.price });
+      buckets.set(bts, { ts: bts, open: p.open ?? p.price, high: hi, low: lo, close: p.price });
     } else {
       const b = buckets.get(bts);
-      if (p.price > b.high) b.high = p.price;
-      if (p.price < b.low)  b.low  = p.price;
+      if (hi > b.high) b.high = hi;
+      if (lo < b.low)  b.low  = lo;
       b.close = p.price;
     }
   });
@@ -855,11 +866,15 @@ async function fetchAlphaVantageChart(f, t, interval) {
     rawPoints = S.avRawCache[rawKey].data;
   } else {
     rawPoints = await avEnqueue(async () => {
+      // 1min: compact (100 bars ≈ 1.7 h) is plenty for a 1m chart.
+      // 5min: full (trailing 30 days) so that all aggregated intervals
+      //        (15m, 30m, 1h, 2h, 4h) have enough history from one fetch.
+      const outputsize = avInterval === "1min" ? "compact" : "full";
       const url = `https://www.alphavantage.co/query?function=FX_INTRADAY`
                 + `&from_symbol=${encodeURIComponent(f)}`
                 + `&to_symbol=${encodeURIComponent(t)}`
                 + `&interval=${avInterval}`
-                + `&outputsize=compact`
+                + `&outputsize=${outputsize}`
                 + `&apikey=${encodeURIComponent(CFG.AV_KEY)}`;
 
       const res = await fetch(url);
@@ -867,8 +882,14 @@ async function fetchAlphaVantageChart(f, t, interval) {
       const j = await res.json();
 
       if (j["Error Message"]) throw new Error(j["Error Message"]);
-      // AV returns a "Note" or "Information" message when the rate limit is hit
-      if (j["Note"] || j["Information"]) throw new Error("RATE_LIMIT");
+      // "Note" = rate-limit hit on free tier (5 req/min).
+      // Push _avLast forward so the queue waits ~60 s before retrying.
+      if (j["Note"]) {
+        _avLast = Date.now() + 55_000;
+        throw new Error("RATE_LIMIT");
+      }
+      // "Information" = premium-only endpoint; free-tier key has no access.
+      if (j["Information"]) throw new Error("PREMIUM_REQUIRED");
 
       const tsKey  = `Time Series FX (${avInterval})`;
       const series = j[tsKey];
@@ -1249,7 +1270,14 @@ async function loadChart(f, t, interval) {
       document.getElementById("statsGrid").innerHTML = "";
       document.getElementById("infoBlock").innerHTML = `
         <div class="api-key-notice">
-          Rate limit reached (5 req/min).<br>Please wait a moment and try again.
+          Rate limit reached (5 req/min).<br>Please wait ~60 seconds and try again.
+        </div>`;
+    } else if (err.message === "PREMIUM_REQUIRED") {
+      document.getElementById("statsGrid").innerHTML = "";
+      document.getElementById("infoBlock").innerHTML = `
+        <div class="api-key-notice">
+          FX intraday data requires a premium Alpha Vantage subscription.<br>
+          Upgrade at <a href="https://www.alphavantage.co/premium/" target="_blank" rel="noopener" style="color:var(--blue)">alphavantage.co/premium</a>.
         </div>`;
     } else {
       document.getElementById("statsGrid").innerHTML =
