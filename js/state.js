@@ -2,14 +2,14 @@
    STATE
    ============================================================ */
 const S = {
-  rates:      {},   // USD-base rates from open.er-api
-  prevRates:  {},   // Previous-close rates from Frankfurter
-  histCache:  {},   // Frankfurter sparkline cache
-  chartCache: {},   // Processed chart data cache (per interval)
+  rates:      {},   // Direct pair rates from Yahoo Finance: { "EUR/USD": 1.0856, ... }
+  prevRates:  {},   // Previous-close pair rates from Yahoo Finance: { "EUR/USD": 1.0823, ... }
+  histCache:  {},   // Sparkline data cache (7-day daily bars via YF)
+  chartCache: {},   // Processed chart data cache (per pair/interval)
   yfRawCache: {},   // Raw Yahoo Finance OHLCV cache (per yfInterval)
-  selected:   null, // currently open pair config object
-  interval:   "1m", // current chart interval
-  chart:      null,
+  selected:   null, // Currently open pair config object
+  interval:   "1m", // Current chart interval
+  chart:      null, // Active LightweightCharts chart instance
   query:      "",
   countdown:  0,
   busy:       false,
