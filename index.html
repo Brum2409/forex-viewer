@@ -455,68 +455,6 @@
       padding-bottom: calc(12px + var(--safe-bottom));
     }
 
-    /* ── Settings Modal ────────────────────────────────────── */
-    .modal-overlay {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.72);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      z-index: 600;
-      display: flex; align-items: center; justify-content: center;
-      padding: 20px;
-    }
-    .modal {
-      background: var(--bg1);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px;
-      width: 100%; max-width: 380px;
-      box-shadow: var(--shadow-lg);
-    }
-    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
-    .modal-desc  { color: var(--txt2); font-size: 13px; margin-bottom: 14px; line-height: 1.55; }
-    .modal-link  { color: var(--blue); text-decoration: none; }
-    .modal-input {
-      width: 100%;
-      background: var(--bg0);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 9px 12px;
-      color: var(--txt1);
-      font-size: 13px;
-      outline: none;
-      margin-bottom: 12px;
-      font-family: monospace;
-      letter-spacing: 0.5px;
-      transition: border-color var(--transition), box-shadow var(--transition);
-    }
-    .modal-input:focus {
-      border-color: var(--blue);
-      box-shadow: 0 0 0 3px rgba(88,166,255,0.12);
-    }
-    .modal-input::placeholder { color: var(--txt3); letter-spacing: 0; }
-    .modal-actions { display: flex; gap: 8px; }
-    .modal-actions button {
-      flex: 1; padding: 9px; border-radius: var(--radius-sm);
-      font-size: 14px; font-weight: 500; border: none; cursor: pointer;
-    }
-    .modal-save   { background: var(--blue); color: #fff; }
-    .modal-cancel { background: var(--bg2); color: var(--txt2); border: 1px solid var(--border) !important; }
-    .api-key-notice {
-      margin: 0 14px 14px;
-      background: var(--blue-dim);
-      border: 1px solid rgba(88,166,255,0.2);
-      border-radius: 10px; padding: 14px;
-      font-size: 13px; color: var(--txt2);
-      text-align: center; line-height: 1.55;
-    }
-    .api-key-notice button {
-      margin-top: 10px;
-      background: var(--blue); border: none; color: #fff;
-      padding: 8px 18px; border-radius: var(--radius-sm);
-      font-size: 13px; font-weight: 500; cursor: pointer;
-    }
-
     /* ── Responsive: wider screens ─────────────────────────── */
     @media (min-width: 640px) {
       .pair-list { display: grid; grid-template-columns: repeat(2,1fr); gap: 7px; }
@@ -546,7 +484,6 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="icon-btn" title="Alpha Vantage Settings" onclick="openSettings()">⚙</button>
       <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
         <span class="spin-icon" id="spinIcon">↻</span>
         <span id="refreshLabel">Refresh</span>
@@ -619,24 +556,6 @@
     </div>
   </div>
 
-  <!-- ── Settings Modal ─────────────────────────────────── -->
-  <div class="modal-overlay" id="settingsModal" style="display:none" onclick="handleOverlayClick(event)">
-    <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-title">Alpha Vantage API Key</div>
-      <div class="modal-desc">
-        Enter your Alpha Vantage API key to enable intraday charts (1m – 4h).
-        Free tier supports 5 requests/minute.
-        Get a free key at <a class="modal-link" href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener">alphavantage.co</a>.
-      </div>
-      <input class="modal-input" id="apiKeyInput" type="password"
-        placeholder="YOUR_ALPHAVANTAGE_KEY"
-        autocomplete="off" spellcheck="false">
-      <div class="modal-actions">
-        <button class="modal-save" onclick="saveSettings()">Save Key</button>
-        <button class="modal-cancel" onclick="closeSettings()">Cancel</button>
-      </div>
-    </div>
-  </div>
 
 </div><!-- .app -->
 
@@ -646,7 +565,6 @@
    ============================================================ */
 const CFG = {
   REFRESH_SECS: 15 * 60,
-  AV_KEY: localStorage.getItem('av_key') || '',
   PAIRS: [
     // Majors
     { f:"EUR", t:"USD", fn:"Euro",             tn:"US Dollar",         ff:"🇪🇺", tf:"🇺🇸", cat:"Majors" },
@@ -685,23 +603,20 @@ const CFG = {
 };
 
 /* ============================================================
-   INTERVAL → ALPHA VANTAGE / FRANKFURTER MAPPING
-   avInterval: null means "use Frankfurter" (1D / 1W)
-   2h and 4h share the 60min AV fetch and aggregate client-side
+   INTERVAL → YAHOO FINANCE / FRANKFURTER MAPPING
+   yfInterval: null means "use Frankfurter" (1D / 1W)
+   2h and 4h share the 1h YF fetch and aggregate client-side
    ============================================================ */
 const INTERVAL_CONFIG = {
-  "1m":  { avInterval: "1min",  groupMins: 1     },
-  // 5m–4h all share one "5min" outputsize=full fetch (≈8 640 bars, 30 days).
-  // Switching between any of these 6 intervals costs 0 extra API calls after
-  // the first fetch, keeping usage well within the 5 req/min free-tier limit.
-  "5m":  { avInterval: "5min",  groupMins: 5     },
-  "15m": { avInterval: "5min",  groupMins: 15    },
-  "30m": { avInterval: "5min",  groupMins: 30    },
-  "1h":  { avInterval: "5min",  groupMins: 60    },
-  "2h":  { avInterval: "5min",  groupMins: 120   },
-  "4h":  { avInterval: "5min",  groupMins: 240   },
-  "1D":  { avInterval: null,    groupMins: 1440  },
-  "1W":  { avInterval: null,    groupMins: 10080 },
+  "1m":  { yfInterval: "1m",  yfRange: "1d",   groupMins: 1    },
+  "5m":  { yfInterval: "5m",  yfRange: "5d",   groupMins: 5    },
+  "15m": { yfInterval: "15m", yfRange: "60d",  groupMins: 15   },
+  "30m": { yfInterval: "30m", yfRange: "60d",  groupMins: 30   },
+  "1h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 60   },
+  "2h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 120  },
+  "4h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 240  },
+  "1D":  { yfInterval: null,  yfRange: null,   groupMins: 1440 },
+  "1W":  { yfInterval: null,  yfRange: null,   groupMins: 10080},
 };
 
 const INTERVAL_LABELS = {
@@ -723,7 +638,7 @@ const S = {
   prevRates:  {},   // Previous-close rates from Frankfurter
   histCache:  {},   // Frankfurter sparkline cache
   chartCache: {},   // Processed chart data cache (per interval)
-  avRawCache: {},   // Raw Alpha Vantage OHLCV cache (per avInterval)
+  yfRawCache: {},   // Raw Yahoo Finance OHLCV cache (per yfInterval)
   selected:   null, // currently open pair config object
   interval:   "1m", // current chart interval
   chart:      null,
@@ -759,31 +674,26 @@ function fmt(rate, f, t) {
 function isoDate(d) { return d.toISOString().slice(0,10); }
 
 /* ============================================================
-   ALPHA VANTAGE RATE LIMITER  (free tier: 5 req / min)
-   Requests are queued and spaced ≥ 12.5 s apart.
+   CORS PROXIES  (Yahoo Finance blocks direct browser requests)
+   Tried in order; first successful response is used.
    ============================================================ */
-const _avQueue = [];
-let   _avLast  = 0;
-let   _avTimer = null;
+const CORS_PROXIES = [
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+];
 
-function avEnqueue(fn) {
-  return new Promise((resolve, reject) => {
-    _avQueue.push({ fn, resolve, reject });
-    _avDrain();
-  });
-}
-
-function _avDrain() {
-  if (_avTimer || !_avQueue.length) return;
-  const wait = Math.max(0, _avLast + 12_500 - Date.now());
-  _avTimer = setTimeout(() => {
-    _avTimer = null;
-    if (!_avQueue.length) return;
-    const { fn, resolve, reject } = _avQueue.shift();
-    _avLast = Date.now();
-    fn().then(resolve, reject);
-    if (_avQueue.length) _avDrain();
-  }, wait);
+async function fetchWithCorsProxy(url) {
+  let lastErr;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const res = await fetch(proxy(url));
+      if (res.ok) return res;
+      lastErr = new Error(`Proxy returned HTTP ${res.status}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("All CORS proxies failed");
 }
 
 /* ============================================================
@@ -841,82 +751,67 @@ function fmtChartLabel(ts, interval) {
 }
 
 /* ============================================================
-   ALPHA VANTAGE — INTRADAY CHART DATA
-   Intervals 1m–4h.  2h and 4h fetch 60min data and aggregate.
-   Raw AV responses are cached per avInterval to avoid redundant
-   API calls when the user switches between 1h / 2h / 4h.
+   YAHOO FINANCE — INTRADAY CHART DATA  (1m – 4h)
+   No API key required. Uses CORS proxies to bypass browser
+   same-origin restrictions on query1.finance.yahoo.com.
+   2h and 4h share the 1h fetch and aggregate client-side.
    ============================================================ */
-async function fetchAlphaVantageChart(f, t, interval) {
-  if (!CFG.AV_KEY) throw new Error("NO_API_KEY");
-
+async function fetchYahooFinanceChart(f, t, interval) {
   const cacheKey = `${f}/${t}/${interval}`;
   const cached   = S.chartCache[cacheKey];
   const ttl      = CACHE_TTL[interval] || 300_000;
   if (cached && Date.now() - cached.ts < ttl) return cached.data;
 
-  const { avInterval, groupMins } = INTERVAL_CONFIG[interval];
-  const avGroupMins = { "1min":1, "5min":5, "15min":15, "30min":30, "60min":60 }[avInterval] || 1;
+  const { yfInterval, yfRange, groupMins } = INTERVAL_CONFIG[interval];
+  const yfGroupMins = { "1m":1, "5m":5, "15m":15, "30m":30, "1h":60 }[yfInterval] || 1;
 
-  // Raw cache: 1h / 2h / 4h all share the same 60min AV payload
-  const rawKey = `${f}/${t}/${avInterval}`;
-  const RAW_TTL = 10 * 60_000; // 10 min
+  // 2h and 4h share the same 1h raw fetch
+  const rawKey = `${f}/${t}/${yfInterval}`;
+  const RAW_TTL = 5 * 60_000; // 5 min
   let rawPoints;
 
-  if (S.avRawCache[rawKey] && Date.now() - S.avRawCache[rawKey].ts < RAW_TTL) {
-    rawPoints = S.avRawCache[rawKey].data;
+  if (S.yfRawCache[rawKey] && Date.now() - S.yfRawCache[rawKey].ts < RAW_TTL) {
+    rawPoints = S.yfRawCache[rawKey].data;
   } else {
-    rawPoints = await avEnqueue(async () => {
-      // 1min: compact (100 bars ≈ 1.7 h) is plenty for a 1m chart.
-      // 5min: full (trailing 30 days) so that all aggregated intervals
-      //        (15m, 30m, 1h, 2h, 4h) have enough history from one fetch.
-      const outputsize = avInterval === "1min" ? "compact" : "full";
-      const url = `https://www.alphavantage.co/query?function=FX_INTRADAY`
-                + `&from_symbol=${encodeURIComponent(f)}`
-                + `&to_symbol=${encodeURIComponent(t)}`
-                + `&interval=${avInterval}`
-                + `&outputsize=${outputsize}`
-                + `&apikey=${encodeURIComponent(CFG.AV_KEY)}`;
+    const symbol = `${f}${t}=X`;
+    const yfUrl  = `https://query1.finance.yahoo.com/v8/finance/chart/`
+                 + `${encodeURIComponent(symbol)}`
+                 + `?interval=${yfInterval}&range=${yfRange}`;
 
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Alpha Vantage HTTP ${res.status}`);
-      const j = await res.json();
+    const res = await fetchWithCorsProxy(yfUrl);
+    if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status}`);
+    const j = await res.json();
 
-      if (j["Error Message"]) throw new Error(j["Error Message"]);
-      // "Note" = rate-limit hit on free tier (5 req/min).
-      // Push _avLast forward so the queue waits ~60 s before retrying.
-      if (j["Note"]) {
-        _avLast = Date.now() + 55_000;
-        throw new Error("RATE_LIMIT");
-      }
-      // "Information" = premium-only endpoint; free-tier key has no access.
-      if (j["Information"]) throw new Error("PREMIUM_REQUIRED");
+    if (j.chart?.error) throw new Error(j.chart.error.description || "Yahoo Finance error");
+    const result = j.chart?.result?.[0];
+    if (!result) throw new Error("No data from Yahoo Finance");
 
-      const tsKey  = `Time Series FX (${avInterval})`;
-      const series = j[tsKey];
-      if (!series) throw new Error("No data returned from Alpha Vantage");
+    const timestamps = result.timestamp || [];
+    const quote  = result.indicators?.quote?.[0] || {};
+    const opens  = quote.open  || [];
+    const highs  = quote.high  || [];
+    const lows   = quote.low   || [];
+    const closes = quote.close || [];
 
-      return Object.entries(series)
-        .map(([dateStr, v]) => ({
-          // AV timestamps are in US/Eastern; treat as UTC for display consistency
-          ts:    new Date(dateStr.replace(' ', 'T') + 'Z').getTime(),
-          price: parseFloat(v["4. close"]),
-          open:  parseFloat(v["1. open"]),
-          high:  parseFloat(v["2. high"]),
-          low:   parseFloat(v["3. low"]),
-        }))
-        .filter(p => !isNaN(p.ts) && !isNaN(p.price))
-        .sort((a, b) => a.ts - b.ts);
-    });
+    rawPoints = timestamps
+      .map((ts, i) => ({
+        ts:    ts * 1000,   // YF timestamps are Unix seconds → ms
+        price: closes[i],
+        open:  opens[i],
+        high:  highs[i],
+        low:   lows[i],
+      }))
+      .filter(p => p.price != null && !isNaN(p.ts))
+      .sort((a, b) => a.ts - b.ts);
 
-    S.avRawCache[rawKey] = { data: rawPoints, ts: Date.now() };
+    S.yfRawCache[rawKey] = { data: rawPoints, ts: Date.now() };
   }
 
-  // If groupMins > avGroupMins (e.g. 4h from 60min), aggregate client-side
+  // Aggregate client-side when groupMins > native interval (e.g. 4h from 1h)
   let data;
-  if (groupMins > avGroupMins) {
+  if (groupMins > yfGroupMins) {
     data = aggregateData(rawPoints, groupMins);
   } else {
-    // Use OHLCV directly from AV
     data = rawPoints.map(p => ({
       ts: p.ts, rate: p.price, open: p.open, high: p.high, low: p.low,
     }));
@@ -1129,7 +1024,7 @@ function buildMultiTimeframeData(f, t) {
         return { key, label, chgPct, up: chgPct >= 0, hasData: true };
       }
     }
-    // For intraday intervals use Alpha Vantage chart cache
+    // For intraday intervals use Yahoo Finance chart cache
     const cached = S.chartCache[`${f}/${t}/${key}`];
     if (cached && cached.data && cached.data.length > 0) {
       const data = cached.data;
@@ -1237,7 +1132,8 @@ async function setChartInterval(btn, interval) {
 
 /* ============================================================
    CHART LOADING
-   Intraday (1m–4h) → Alpha Vantage   |   1D / 1W → Frankfurter
+   Intraday (1m–4h) → Yahoo Finance (via CORS proxy)
+   1D / 1W → Frankfurter
    ============================================================ */
 async function loadChart(f, t, interval) {
   const canvas = document.getElementById("mainChart");
@@ -1253,39 +1149,16 @@ async function loadChart(f, t, interval) {
   try {
     data = usesFrankfurter
       ? await fetchFrankfurterChart(f, t, interval)
-      : await fetchAlphaVantageChart(f, t, interval);
+      : await fetchYahooFinanceChart(f, t, interval);
   } catch (err) {
     loader.style.display = "none";
     canvas.style.opacity = "1";
 
-    if (err.message === "NO_API_KEY") {
-      document.getElementById("statsGrid").innerHTML = "";
-      document.getElementById("infoBlock").innerHTML = `
-        <div class="api-key-notice">
-          Add your Alpha Vantage API key to view intraday charts.
-          Get a free key at <a href="https://www.alphavantage.co" target="_blank" rel="noopener" style="color:var(--blue)">alphavantage.co</a>.
-          <br><button onclick="openSettings()">⚙ Configure API Key</button>
-        </div>`;
-    } else if (err.message === "RATE_LIMIT") {
-      document.getElementById("statsGrid").innerHTML = "";
-      document.getElementById("infoBlock").innerHTML = `
-        <div class="api-key-notice">
-          Rate limit reached (5 req/min).<br>Please wait ~60 seconds and try again.
-        </div>`;
-    } else if (err.message === "PREMIUM_REQUIRED") {
-      document.getElementById("statsGrid").innerHTML = "";
-      document.getElementById("infoBlock").innerHTML = `
-        <div class="api-key-notice">
-          FX intraday data requires a premium Alpha Vantage subscription.<br>
-          Upgrade at <a href="https://www.alphavantage.co/premium/" target="_blank" rel="noopener" style="color:var(--blue)">alphavantage.co/premium</a>.
-        </div>`;
-    } else {
-      document.getElementById("statsGrid").innerHTML =
-        `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0;text-align:center">
-          Chart data unavailable for this pair / interval.
-        </div>`;
-      document.getElementById("infoBlock").innerHTML = "";
-    }
+    document.getElementById("statsGrid").innerHTML =
+      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0;text-align:center">
+        Chart data unavailable. Check your connection and try again.
+      </div>`;
+    document.getElementById("infoBlock").innerHTML = "";
     return;
   }
 
@@ -1351,7 +1224,7 @@ async function loadChart(f, t, interval) {
       </div>
       <div class="info-row">
         <span class="info-k">Source</span>
-        <span class="info-v" style="color:var(--txt3)">${usesFrankfurter ? "Frankfurter / ECB" : "Alpha Vantage"}</span>
+        <span class="info-v" style="color:var(--txt3)">${usesFrankfurter ? "Frankfurter / ECB" : "Yahoo Finance"}</span>
       </div>
     </div>
   `;
@@ -1415,40 +1288,6 @@ async function loadChart(f, t, interval) {
   });
 }
 
-/* ============================================================
-   SETTINGS MODAL
-   ============================================================ */
-function openSettings() {
-  document.getElementById("apiKeyInput").value = CFG.AV_KEY;
-  document.getElementById("settingsModal").style.display = "flex";
-  setTimeout(() => document.getElementById("apiKeyInput").focus(), 50);
-}
-
-function closeSettings() {
-  document.getElementById("settingsModal").style.display = "none";
-}
-
-function handleOverlayClick(e) {
-  if (e.target === e.currentTarget) closeSettings();
-}
-
-function saveSettings() {
-  const key = document.getElementById("apiKeyInput").value.trim();
-  CFG.AV_KEY = key;
-  if (key) {
-    localStorage.setItem('av_key', key);
-  } else {
-    localStorage.removeItem('av_key');
-  }
-  // Clear caches so next load fetches fresh with new key
-  S.chartCache  = {};
-  S.avRawCache  = {};
-  closeSettings();
-  // Reload chart if detail is open
-  if (S.selected && document.getElementById("detail").classList.contains("open")) {
-    loadChart(S.selected.f, S.selected.t, S.interval);
-  }
-}
 
 /* ============================================================
    SEARCH
@@ -1563,7 +1402,6 @@ detailEl.addEventListener("touchend", e => {
    ============================================================ */
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
-    closeSettings();
     closeDetail();
   }
 });
