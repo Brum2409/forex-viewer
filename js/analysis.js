@@ -173,13 +173,13 @@ function calcFibLevels(candles, pipSize) {
   const base   = trend === 'UP' ? swingHigh.price : swingLow.price;
   const dir    = trend === 'UP' ? -1 : 1; // UP: price retraced down; DOWN: price bounced up
   const levels = {
-    '0':    swingHigh.price,
+    '0':    trend === 'UP' ? swingHigh.price : swingLow.price,
     '23.6': base + dir * 0.236 * range,
     '38.2': base + dir * 0.382 * range,
     '50.0': base + dir * 0.500 * range,
     '61.8': base + dir * 0.618 * range,
     '78.6': base + dir * 0.786 * range,
-    '100':  swingLow.price,
+    '100':  trend === 'UP' ? swingLow.price  : swingHigh.price,
   };
 
   // Find the nearest level to current price
@@ -715,22 +715,18 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
   }
 
   // ── Zone proximity ───────────────────────────────────────
+  // detectZones guarantees supply zones have bottom > currentPrice and
+  // demand zones have top < currentPrice, so only proximity checks apply.
   const nearPips = 10;
   for (const tf of ['weekly', 'daily', 'h4']) {
     const z = zones[tf];
     if (!z) continue;
     for (const zone of z.supply) {
-      if (currentPrice >= zone.bottom && currentPrice <= zone.top) {
-        add(-5, `${tf.toUpperCase()} Inside Supply`, `${zone.strength} touches`); break;
-      }
       if (zone.bottom - currentPrice <= nearPips * pipSize) {
         add(-8, `${tf.toUpperCase()} Near Supply`, `${zone.strength} touches`); break;
       }
     }
     for (const zone of z.demand) {
-      if (currentPrice >= zone.bottom && currentPrice <= zone.top) {
-        add(5,  `${tf.toUpperCase()} Inside Demand`, `${zone.strength} touches`); break;
-      }
       if (currentPrice - zone.top <= nearPips * pipSize) {
         add(8,  `${tf.toUpperCase()} Near Demand`, `${zone.strength} touches`); break;
       }

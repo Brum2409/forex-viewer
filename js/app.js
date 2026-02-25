@@ -81,16 +81,6 @@ function manualRefresh() {
 }
 
 /* ============================================================
-   SWIPE-TO-CLOSE DETAIL (touch)
-   ============================================================ */
-let _touchX = 0;
-const detailEl = document.getElementById("detail");
-detailEl.addEventListener("touchstart", e => { _touchX = e.touches[0].clientX; }, { passive: true });
-detailEl.addEventListener("touchend",   e => {
-  if (e.changedTouches[0].clientX - _touchX > 70) closeDetail();
-}, { passive: true });
-
-/* ============================================================
    KEYBOARD
    ============================================================ */
 document.addEventListener("keydown", e => {
