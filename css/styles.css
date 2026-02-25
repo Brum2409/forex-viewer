@@ -389,3 +389,263 @@ input  { font-family: inherit; }
   }
   .chart-wrap { height: 320px; }
 }
+
+/* ── Analysis Panel ────────────────────────────────────────── */
+.analysis-wrap {
+  padding-bottom: 16px;
+}
+
+.analysis-loading {
+  display: flex; align-items: center; gap: 10px;
+  padding: 20px 0;
+  color: var(--txt3); font-size: 13px;
+}
+
+.analysis-error {
+  padding: 12px 0;
+  color: var(--txt2); font-size: 12px;
+  font-style: italic;
+}
+
+.analysis-section {
+  margin-top: 14px;
+}
+
+.analysis-section-title {
+  font-size: 10px; font-weight: 700;
+  color: var(--txt3);
+  text-transform: uppercase; letter-spacing: 0.8px;
+  margin-bottom: 6px;
+}
+
+.analysis-empty {
+  font-size: 12px; color: var(--txt3); padding: 4px 0;
+  font-style: italic;
+}
+
+/* Recommendation banner */
+.rec-banner {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+.rec-banner.rec-buy     { border-color: rgba(63,185,80,0.4);  background: rgba(63,185,80,0.08); }
+.rec-banner.rec-sell    { border-color: rgba(248,81,73,0.4);  background: rgba(248,81,73,0.08); }
+.rec-banner.rec-neutral { border-color: var(--border);        background: var(--bg1); }
+
+.rec-label {
+  font-size: 16px; font-weight: 800; letter-spacing: -0.3px;
+}
+.rec-banner.rec-buy     .rec-label { color: var(--green); }
+.rec-banner.rec-sell    .rec-label { color: var(--red); }
+.rec-banner.rec-neutral .rec-label { color: var(--txt2); }
+
+.rec-score-wrap {
+  display: flex; align-items: center; gap: 8px;
+}
+.rec-score-num {
+  font-size: 13px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--txt2); min-width: 32px; text-align: right;
+}
+
+/* Score bar */
+.score-bar-wrap  { display: flex; align-items: center; }
+.score-bar-track {
+  width: 80px; height: 6px;
+  background: var(--bg3);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+/* Bias table */
+.bias-table {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.bias-row {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.bias-tf {
+  font-size: 10px; font-weight: 700;
+  color: var(--txt3); width: 38px; flex-shrink: 0;
+}
+.bias-structure {
+  flex: 1; color: var(--txt2); font-weight: 500;
+}
+.bias-ema {
+  font-size: 10px; color: var(--txt3);
+  margin-right: 4px;
+}
+.bias-badge {
+  font-size: 10px; font-weight: 700;
+  padding: 2px 7px; border-radius: 4px; flex-shrink: 0;
+}
+.bias-bull { color: var(--green); background: var(--green-dim); }
+.bias-bear { color: var(--red);   background: var(--red-dim); }
+.bias-neut { color: var(--txt3);  background: var(--bg3); }
+
+/* Zone pills */
+.zone-pill {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+.zone-supply {
+  border-color: rgba(248,81,73,0.25);
+  background: rgba(248,81,73,0.05);
+}
+.zone-demand {
+  border-color: rgba(63,185,80,0.25);
+  background: rgba(63,185,80,0.05);
+}
+.zone-supply.zone-near {
+  border-color: rgba(248,81,73,0.6);
+  background: rgba(248,81,73,0.10);
+}
+.zone-demand.zone-near {
+  border-color: rgba(63,185,80,0.6);
+  background: rgba(63,185,80,0.10);
+}
+.zone-tf {
+  font-size: 9px; font-weight: 700;
+  color: var(--txt3); width: 34px; flex-shrink: 0;
+}
+.zone-type {
+  font-size: 10px; font-weight: 600;
+  width: 42px; flex-shrink: 0;
+}
+.zone-supply .zone-type { color: var(--red); }
+.zone-demand .zone-type { color: var(--green); }
+.zone-range {
+  flex: 1; font-variant-numeric: tabular-nums;
+  color: var(--txt2); font-size: 10px;
+}
+.zone-strength {
+  font-size: 10px; color: var(--txt3); flex-shrink: 0;
+}
+
+/* Pattern items */
+.pattern-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+.pat-bull { border-color: rgba(63,185,80,0.25);  background: rgba(63,185,80,0.05); }
+.pat-bear { border-color: rgba(248,81,73,0.25);  background: rgba(248,81,73,0.05); }
+.pat-neut { border-color: var(--border);          background: var(--bg1); }
+.pat-tf {
+  font-size: 9px; font-weight: 700;
+  color: var(--txt3); width: 34px; flex-shrink: 0;
+}
+.pat-name {
+  flex: 1; font-weight: 600; color: var(--txt1);
+}
+.pat-conf {
+  font-size: 9px; font-weight: 700;
+  padding: 1px 5px; border-radius: 3px;
+  flex-shrink: 0;
+}
+.pat-bull .pat-conf { color: var(--green); background: var(--green-dim); }
+.pat-bear .pat-conf { color: var(--red);   background: var(--red-dim); }
+.pat-neut .pat-conf { color: var(--txt3);  background: var(--bg3); }
+
+/* Factor score breakdown */
+.factor-table {
+  display: flex; flex-direction: column; gap: 3px;
+}
+.factor-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+}
+.factor-label {
+  flex: 1; color: var(--txt2); font-size: 10px;
+}
+.factor-value {
+  font-size: 10px; color: var(--txt3);
+  margin-right: 4px;
+}
+.factor-pts {
+  font-size: 11px; font-weight: 700;
+  min-width: 28px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.factor-pos { color: var(--green); }
+.factor-neg { color: var(--red); }
+.factor-neu { color: var(--txt3); }
+
+/* Indicator grid (RSI, MACD, ATR, EMA cross, Fibonacci) */
+.ind-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+.ind-cell {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ind-cell-wide {
+  grid-column: span 2;
+  flex-direction: row; align-items: center; gap: 8px;
+}
+.ind-cell-wide .ind-val { font-size: 13px; }
+.ind-cell-wide .ind-lbl { margin-left: auto; }
+.ind-name {
+  font-size: 10px; color: var(--txt3); font-weight: 600;
+}
+.ind-val {
+  font-size: 14px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+.ind-lbl {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ind-bull { color: var(--green); }
+.ind-bear { color: var(--red); }
+.ind-neut { color: var(--txt3); }
+
+/* RSI divergence badge */
+.div-badge {
+  display: inline-block;
+  font-size: 8px; font-weight: 800;
+  padding: 1px 5px; border-radius: 3px;
+  margin-top: 2px; letter-spacing: 0.4px;
+}
+.div-bull { color: var(--green); background: var(--green-dim); }
+.div-bear { color: var(--red);   background: var(--red-dim); }
+
+/* EMA cross badges inside bias rows */
+.cross-badge {
+  font-size: 9px; font-weight: 800;
+  padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+}
+.cross-golden { color: #F0C040; background: rgba(240,192,64,0.12); }
+.cross-death  { color: var(--red); background: var(--red-dim); }
