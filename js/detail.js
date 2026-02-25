@@ -322,6 +322,7 @@ function _triggerAnalysis(f, t) {
    ============================================================ */
 function _renderAnalysisPanel(panel, result, f, t) {
   const { biases, zones, hsPatterns, candlePatterns, indicators, confidence } = result;
+  panel._btPair = { f, t }; // stash for backtest section
 
   const rec    = confidence && confidence.recommendation ? confidence.recommendation : 'NEUTRAL';
   const score  = confidence && confidence.score != null  ? confidence.score : 0;
@@ -396,6 +397,8 @@ function _renderAnalysisPanel(panel, result, f, t) {
       </div>
 
     </div>`;
+
+  appendBacktestSection(panel, f, t);
 }
 
 function _buildIndicatorSection(indicators, pipSize) {
