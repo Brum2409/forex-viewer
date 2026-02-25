@@ -546,7 +546,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="icon-btn" title="SerpAPI Settings" onclick="openSettings()">⚙</button>
+      <button class="icon-btn" title="Alpha Vantage Settings" onclick="openSettings()">⚙</button>
       <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
         <span class="spin-icon" id="spinIcon">↻</span>
         <span id="refreshLabel">Refresh</span>
@@ -622,13 +622,14 @@
   <!-- ── Settings Modal ─────────────────────────────────── -->
   <div class="modal-overlay" id="settingsModal" style="display:none" onclick="handleOverlayClick(event)">
     <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-title">SerpAPI Configuration</div>
+      <div class="modal-title">Alpha Vantage API Key</div>
       <div class="modal-desc">
-        Enter your SerpAPI key to enable intraday chart data via Google Finance.
-        Get a free key at <a class="modal-link" href="https://serpapi.com/" target="_blank" rel="noopener">serpapi.com</a>.
+        Enter your Alpha Vantage API key to enable intraday charts (1m – 4h).
+        Free tier supports 5 requests/minute.
+        Get a free key at <a class="modal-link" href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener">alphavantage.co</a>.
       </div>
       <input class="modal-input" id="apiKeyInput" type="password"
-        placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        placeholder="YOUR_ALPHAVANTAGE_KEY"
         autocomplete="off" spellcheck="false">
       <div class="modal-actions">
         <button class="modal-save" onclick="saveSettings()">Save Key</button>
@@ -645,7 +646,7 @@
    ============================================================ */
 const CFG = {
   REFRESH_SECS: 15 * 60,
-  SERPAPI_KEY: localStorage.getItem('serpapi_key') || '',
+  AV_KEY: localStorage.getItem('av_key') || '',
   PAIRS: [
     // Majors
     { f:"EUR", t:"USD", fn:"Euro",             tn:"US Dollar",         ff:"🇪🇺", tf:"🇺🇸", cat:"Majors" },
@@ -684,18 +685,20 @@ const CFG = {
 };
 
 /* ============================================================
-   INTERVAL → SERPAPI WINDOW MAPPING
+   INTERVAL → ALPHA VANTAGE / FRANKFURTER MAPPING
+   avInterval: null means "use Frankfurter" (1D / 1W)
+   2h and 4h share the 60min AV fetch and aggregate client-side
    ============================================================ */
 const INTERVAL_CONFIG = {
-  "1m":  { serpWindow: "1D",  groupMins: 1     },
-  "5m":  { serpWindow: "1D",  groupMins: 5     },
-  "15m": { serpWindow: "1D",  groupMins: 15    },
-  "30m": { serpWindow: "1D",  groupMins: 30    },
-  "1h":  { serpWindow: "5D",  groupMins: 60    },
-  "2h":  { serpWindow: "5D",  groupMins: 120   },
-  "4h":  { serpWindow: "1M",  groupMins: 240   },
-  "1D":  { serpWindow: "1Y",  groupMins: 1440  },
-  "1W":  { serpWindow: "5Y",  groupMins: 10080 },
+  "1m":  { avInterval: "1min",  groupMins: 1     },
+  "5m":  { avInterval: "5min",  groupMins: 5     },
+  "15m": { avInterval: "15min", groupMins: 15    },
+  "30m": { avInterval: "30min", groupMins: 30    },
+  "1h":  { avInterval: "60min", groupMins: 60    },
+  "2h":  { avInterval: "60min", groupMins: 120   },
+  "4h":  { avInterval: "60min", groupMins: 240   },
+  "1D":  { avInterval: null,    groupMins: 1440  },
+  "1W":  { avInterval: null,    groupMins: 10080 },
 };
 
 const INTERVAL_LABELS = {
@@ -713,17 +716,18 @@ const CACHE_TTL = {
    STATE
    ============================================================ */
 const S = {
-  rates:     {},    // USD-base rates from open.er-api
-  prevRates: {},    // Previous-close rates from Frankfurter
-  histCache: {},    // Frankfurter sparkline cache
-  chartCache:{},    // SerpAPI chart data cache
-  selected:  null,  // currently open pair config object
-  interval:  "1m",  // current chart interval
-  chart:     null,
-  query:     "",
-  countdown: 0,
-  busy:      false,
-  lastTs:    null,
+  rates:      {},   // USD-base rates from open.er-api
+  prevRates:  {},   // Previous-close rates from Frankfurter
+  histCache:  {},   // Frankfurter sparkline cache
+  chartCache: {},   // Processed chart data cache (per interval)
+  avRawCache: {},   // Raw Alpha Vantage OHLCV cache (per avInterval)
+  selected:   null, // currently open pair config object
+  interval:   "1m", // current chart interval
+  chart:      null,
+  query:      "",
+  countdown:  0,
+  busy:       false,
+  lastTs:     null,
 };
 
 /* ============================================================
@@ -752,22 +756,31 @@ function fmt(rate, f, t) {
 function isoDate(d) { return d.toISOString().slice(0,10); }
 
 /* ============================================================
-   SERPAPI DATE PARSING
+   ALPHA VANTAGE RATE LIMITER  (free tier: 5 req / min)
+   Requests are queued and spaced ≥ 12.5 s apart.
    ============================================================ */
-function parseSerpDate(dateStr) {
-  // "Feb 24 2026, 09:30 AM UTC-05:00" → parse to UTC ms
-  const m = dateStr.match(/(\w{3})\s+(\d+)\s+(\d+),\s+(\d+):(\d+)\s+(AM|PM)\s+UTC([+-])(\d+):(\d+)/);
-  if (m) {
-    const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
-    const [,mon,day,yr,hr,min,ampm,sign,tzH,tzM] = m;
-    let h = parseInt(hr, 10);
-    if (ampm === 'PM' && h !== 12) h += 12;
-    if (ampm === 'AM' && h === 12) h = 0;
-    const tzOffset = (parseInt(tzH, 10) * 60 + parseInt(tzM, 10)) * (sign === '-' ? -1 : 1);
-    return Date.UTC(parseInt(yr,10), MONTHS[mon], parseInt(day,10), h, parseInt(min,10)) - tzOffset * 60_000;
-  }
-  // Fallback
-  return new Date(dateStr.replace(/\bUTC([+-])/, 'GMT$1')).getTime();
+const _avQueue = [];
+let   _avLast  = 0;
+let   _avTimer = null;
+
+function avEnqueue(fn) {
+  return new Promise((resolve, reject) => {
+    _avQueue.push({ fn, resolve, reject });
+    _avDrain();
+  });
+}
+
+function _avDrain() {
+  if (_avTimer || !_avQueue.length) return;
+  const wait = Math.max(0, _avLast + 12_500 - Date.now());
+  _avTimer = setTimeout(() => {
+    _avTimer = null;
+    if (!_avQueue.length) return;
+    const { fn, resolve, reject } = _avQueue.shift();
+    _avLast = Date.now();
+    fn().then(resolve, reject);
+    if (_avQueue.length) _avDrain();
+  }, wait);
 }
 
 /* ============================================================
@@ -817,37 +830,121 @@ function fmtChartLabel(ts, interval) {
 }
 
 /* ============================================================
-   SERPAPI — CHART DATA
+   ALPHA VANTAGE — INTRADAY CHART DATA
+   Intervals 1m–4h.  2h and 4h fetch 60min data and aggregate.
+   Raw AV responses are cached per avInterval to avoid redundant
+   API calls when the user switches between 1h / 2h / 4h.
    ============================================================ */
-async function fetchSerpAPIChart(f, t, interval) {
-  if (!CFG.SERPAPI_KEY) throw new Error("NO_API_KEY");
+async function fetchAlphaVantageChart(f, t, interval) {
+  if (!CFG.AV_KEY) throw new Error("NO_API_KEY");
 
   const cacheKey = `${f}/${t}/${interval}`;
   const cached   = S.chartCache[cacheKey];
   const ttl      = CACHE_TTL[interval] || 300_000;
   if (cached && Date.now() - cached.ts < ttl) return cached.data;
 
-  const { serpWindow, groupMins } = INTERVAL_CONFIG[interval];
-  const q   = `${f}-${t}`;
-  const url = `https://serpapi.com/search.json?engine=google_finance`
-            + `&q=${encodeURIComponent(q)}`
-            + `&window=${serpWindow}`
-            + `&api_key=${encodeURIComponent(CFG.SERPAPI_KEY)}`;
+  const { avInterval, groupMins } = INTERVAL_CONFIG[interval];
+  const avGroupMins = { "1min":1, "5min":5, "15min":15, "30min":30, "60min":60 }[avInterval] || 1;
+
+  // Raw cache: 1h / 2h / 4h all share the same 60min AV payload
+  const rawKey = `${f}/${t}/${avInterval}`;
+  const RAW_TTL = 10 * 60_000; // 10 min
+  let rawPoints;
+
+  if (S.avRawCache[rawKey] && Date.now() - S.avRawCache[rawKey].ts < RAW_TTL) {
+    rawPoints = S.avRawCache[rawKey].data;
+  } else {
+    rawPoints = await avEnqueue(async () => {
+      const url = `https://www.alphavantage.co/query?function=FX_INTRADAY`
+                + `&from_symbol=${encodeURIComponent(f)}`
+                + `&to_symbol=${encodeURIComponent(t)}`
+                + `&interval=${avInterval}`
+                + `&outputsize=compact`
+                + `&apikey=${encodeURIComponent(CFG.AV_KEY)}`;
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Alpha Vantage HTTP ${res.status}`);
+      const j = await res.json();
+
+      if (j["Error Message"]) throw new Error(j["Error Message"]);
+      // AV returns a "Note" or "Information" message when the rate limit is hit
+      if (j["Note"] || j["Information"]) throw new Error("RATE_LIMIT");
+
+      const tsKey  = `Time Series FX (${avInterval})`;
+      const series = j[tsKey];
+      if (!series) throw new Error("No data returned from Alpha Vantage");
+
+      return Object.entries(series)
+        .map(([dateStr, v]) => ({
+          // AV timestamps are in US/Eastern; treat as UTC for display consistency
+          ts:    new Date(dateStr.replace(' ', 'T') + 'Z').getTime(),
+          price: parseFloat(v["4. close"]),
+          open:  parseFloat(v["1. open"]),
+          high:  parseFloat(v["2. high"]),
+          low:   parseFloat(v["3. low"]),
+        }))
+        .filter(p => !isNaN(p.ts) && !isNaN(p.price))
+        .sort((a, b) => a.ts - b.ts);
+    });
+
+    S.avRawCache[rawKey] = { data: rawPoints, ts: Date.now() };
+  }
+
+  // If groupMins > avGroupMins (e.g. 4h from 60min), aggregate client-side
+  let data;
+  if (groupMins > avGroupMins) {
+    data = aggregateData(rawPoints, groupMins);
+  } else {
+    // Use OHLCV directly from AV
+    data = rawPoints.map(p => ({
+      ts: p.ts, rate: p.price, open: p.open, high: p.high, low: p.low,
+    }));
+  }
+
+  S.chartCache[cacheKey] = { data, ts: Date.now() };
+  return data;
+}
+
+/* ============================================================
+   FRANKFURTER — DAILY / WEEKLY CHART DATA  (1D and 1W)
+   No rate limit — existing Frankfurter endpoint.
+   Daily data is returned as-is; weekly data is aggregated.
+   ============================================================ */
+async function fetchFrankfurterChart(f, t, interval) {
+  const cacheKey = `${f}/${t}/${interval}`;
+  const cached   = S.chartCache[cacheKey];
+  const ttl      = CACHE_TTL[interval] || 3_600_000;
+  if (cached && Date.now() - cached.ts < ttl) return cached.data;
+
+  const days  = interval === "1W" ? 365 * 5 : 366;
+  const end   = isoDate(new Date());
+  const start = isoDate(new Date(Date.now() - days * 86_400_000));
+  const url   = `https://api.frankfurter.app/${start}..${end}?from=${f}&to=${t}`;
 
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`SerpAPI HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Frankfurter ${res.status}`);
   const j = await res.json();
-  if (j.error) throw new Error(j.error);
-  if (!j.graph || !j.graph.length) throw new Error("No chart data returned");
 
-  // Parse raw 1-minute points from API
-  const rawPoints = j.graph
-    .map(pt => ({ ts: parseSerpDate(pt.date), price: pt.price }))
-    .filter(p => !isNaN(p.ts) && p.price != null);
+  // rawPoints in { ts, price } form required by aggregateData
+  const rawPoints = Object.entries(j.rates)
+    .map(([date, r]) => ({
+      ts:    new Date(date + 'T12:00:00Z').getTime(),
+      price: r[t],
+    }))
+    .filter(p => p.price != null)
+    .sort((a, b) => a.ts - b.ts);
 
-  if (!rawPoints.length) throw new Error("Could not parse chart data");
+  let data;
+  if (interval === "1W") {
+    // Aggregate daily points into weekly candles
+    data = aggregateData(rawPoints, 10080);
+  } else {
+    // 1D — use each day's close directly
+    data = rawPoints.map(p => ({
+      ts: p.ts, rate: p.price, open: p.price, high: p.price, low: p.price,
+    }));
+  }
 
-  const data = aggregateData(rawPoints, groupMins);
   S.chartCache[cacheKey] = { data, ts: Date.now() };
   return data;
 }
@@ -1011,7 +1108,7 @@ function buildMultiTimeframeData(f, t) {
         return { key, label, chgPct, up: chgPct >= 0, hasData: true };
       }
     }
-    // For intraday intervals use SerpAPI chart cache
+    // For intraday intervals use Alpha Vantage chart cache
     const cached = S.chartCache[`${f}/${t}/${key}`];
     if (cached && cached.data && cached.data.length > 0) {
       const data = cached.data;
@@ -1118,7 +1215,8 @@ async function setChartInterval(btn, interval) {
 }
 
 /* ============================================================
-   CHART LOADING (SerpAPI)
+   CHART LOADING
+   Intraday (1m–4h) → Alpha Vantage   |   1D / 1W → Frankfurter
    ============================================================ */
 async function loadChart(f, t, interval) {
   const canvas = document.getElementById("mainChart");
@@ -1128,20 +1226,30 @@ async function loadChart(f, t, interval) {
 
   if (S.chart) { S.chart.destroy(); S.chart = null; }
 
+  const usesFrankfurter = interval === "1D" || interval === "1W";
+
   let data;
   try {
-    data = await fetchSerpAPIChart(f, t, interval);
+    data = usesFrankfurter
+      ? await fetchFrankfurterChart(f, t, interval)
+      : await fetchAlphaVantageChart(f, t, interval);
   } catch (err) {
     loader.style.display = "none";
     canvas.style.opacity = "1";
 
-    // Handle missing API key gracefully
     if (err.message === "NO_API_KEY") {
       document.getElementById("statsGrid").innerHTML = "";
       document.getElementById("infoBlock").innerHTML = `
         <div class="api-key-notice">
-          Add your SerpAPI key to view intraday charts<br>with real Google Finance data.
+          Add your Alpha Vantage API key to view intraday charts.
+          Get a free key at <a href="https://www.alphavantage.co" target="_blank" rel="noopener" style="color:var(--blue)">alphavantage.co</a>.
           <br><button onclick="openSettings()">⚙ Configure API Key</button>
+        </div>`;
+    } else if (err.message === "RATE_LIMIT") {
+      document.getElementById("statsGrid").innerHTML = "";
+      document.getElementById("infoBlock").innerHTML = `
+        <div class="api-key-notice">
+          Rate limit reached (5 req/min).<br>Please wait a moment and try again.
         </div>`;
     } else {
       document.getElementById("statsGrid").innerHTML =
@@ -1215,7 +1323,7 @@ async function loadChart(f, t, interval) {
       </div>
       <div class="info-row">
         <span class="info-k">Source</span>
-        <span class="info-v" style="color:var(--txt3)">Google Finance via SerpAPI</span>
+        <span class="info-v" style="color:var(--txt3)">${usesFrankfurter ? "Frankfurter / ECB" : "Alpha Vantage"}</span>
       </div>
     </div>
   `;
@@ -1283,7 +1391,7 @@ async function loadChart(f, t, interval) {
    SETTINGS MODAL
    ============================================================ */
 function openSettings() {
-  document.getElementById("apiKeyInput").value = CFG.SERPAPI_KEY;
+  document.getElementById("apiKeyInput").value = CFG.AV_KEY;
   document.getElementById("settingsModal").style.display = "flex";
   setTimeout(() => document.getElementById("apiKeyInput").focus(), 50);
 }
@@ -1298,14 +1406,15 @@ function handleOverlayClick(e) {
 
 function saveSettings() {
   const key = document.getElementById("apiKeyInput").value.trim();
-  CFG.SERPAPI_KEY = key;
+  CFG.AV_KEY = key;
   if (key) {
-    localStorage.setItem('serpapi_key', key);
+    localStorage.setItem('av_key', key);
   } else {
-    localStorage.removeItem('serpapi_key');
+    localStorage.removeItem('av_key');
   }
-  // Clear chart cache so next load fetches fresh with new key
-  S.chartCache = {};
+  // Clear caches so next load fetches fresh with new key
+  S.chartCache  = {};
+  S.avRawCache  = {};
   closeSettings();
   // Reload chart if detail is open
   if (S.selected && document.getElementById("detail").classList.contains("open")) {
