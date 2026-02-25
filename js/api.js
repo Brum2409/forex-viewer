@@ -55,34 +55,70 @@ function aggregateData(rawPoints, groupMins) {
 }
 
 /* ============================================================
-   YAHOO FINANCE — BATCH QUOTE (current rates + prev close)
-   Fetches all 28 pairs in one request. Returns direct pair
-   rates: { "EUR/USD": 1.0856, ... } for both current and prev.
+   FRANKFURTER API — BATCH QUOTE (current rates + prev close + sparklines)
+   Groups pairs by base currency; one request per base fetches a
+   2-week date range so we get current rate, previous close, and
+   7-day sparkline data all in a single round of parallel calls.
+   No API key, no rate limits, CORS-friendly.
    ============================================================ */
-async function fetchYahooQuotes() {
-  const symbols = CFG.PAIRS.map(p => `${p.f}${p.t}=X`).join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=regularMarketPrice,regularMarketPreviousClose`;
-
-  const res = await fetchWithCorsProxy(url);
-  if (!res.ok) throw new Error(`Yahoo Finance quotes HTTP ${res.status}`);
-  const j = await res.json();
-
-  const results = j.quoteResponse?.result || [];
-  if (!results.length) throw new Error("Yahoo Finance returned no quote data");
+async function fetchFrankfurterQuotes() {
+  // Group target currencies by their base currency
+  const groups = {};
+  for (const p of CFG.PAIRS) {
+    if (!groups[p.f]) groups[p.f] = [];
+    groups[p.f].push(p.t);
+  }
 
   const rates     = {};
   const prevRates = {};
 
-  for (const q of results) {
-    // Symbol like "EURUSD=X" → f="EUR", t="USD"
-    const sym = q.symbol.replace('=X', '');
-    const f   = sym.slice(0, 3);
-    const t   = sym.slice(3);
-    const key = `${f}/${t}`;
-    if (q.regularMarketPrice      != null) rates[key]     = q.regularMarketPrice;
-    if (q.regularMarketPreviousClose != null) prevRates[key] = q.regularMarketPreviousClose;
+  // Fetch ~14 days so weekends don't leave us without 2 data points
+  const start = new Date();
+  start.setDate(start.getDate() - 14);
+  const startStr = start.toISOString().slice(0, 10);
+
+  const results = await Promise.allSettled(
+    Object.entries(groups).map(async ([base, targets]) => {
+      const to  = targets.join(',');
+      const url = `https://api.frankfurter.app/${startStr}..?from=${base}&to=${to}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Frankfurter ${base} HTTP ${res.status}`);
+      return { base, targets, data: await res.json() };
+    })
+  );
+
+  for (const r of results) {
+    if (r.status !== 'fulfilled') { console.warn("Frankfurter group failed:", r.reason); continue; }
+    const { base, targets, data } = r.value;
+
+    // data.rates: { "2024-01-15": { "USD": 1.08, ... }, ... }
+    const dates = Object.keys(data.rates).sort();
+    if (!dates.length) continue;
+
+    const latestRates = data.rates[dates[dates.length - 1]];
+    for (const [target, rate] of Object.entries(latestRates)) {
+      rates[`${base}/${target}`] = rate;
+    }
+
+    if (dates.length >= 2) {
+      const prevDayRates = data.rates[dates[dates.length - 2]];
+      for (const [target, rate] of Object.entries(prevDayRates)) {
+        prevRates[`${base}/${target}`] = rate;
+      }
+    }
+
+    // Populate sparkline cache from the same date-range response
+    for (const target of targets) {
+      const key       = `${base}/${target}/7`;
+      const sparkData = dates
+        .map(date => ({ date, rate: data.rates[date]?.[target] }))
+        .filter(x => x.rate != null)
+        .slice(-7);
+      if (sparkData.length) S.histCache[key] = { data: sparkData, ts: Date.now() };
+    }
   }
 
+  if (!Object.keys(rates).length) throw new Error("Frankfurter returned no rate data");
   return { rates, prevRates };
 }
 
