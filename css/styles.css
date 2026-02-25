@@ -643,6 +643,61 @@ input  { font-family: inherit; }
 .div-bear { color: var(--red);   background: var(--red-dim); }
 
 /* ── Backtest Section ──────────────────────────────────────── */
+
+/* Settings panel */
+.bt-settings {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.bt-setting-row {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.bt-setting-label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12px; font-weight: 600; color: var(--txt2);
+}
+.bt-setting-hint {
+  font-size: 10px; font-weight: 400; color: var(--txt3);
+}
+.bt-setting-ctrl {
+  display: flex; align-items: center; gap: 8px;
+}
+.bt-range {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg3);
+  outline: none;
+  cursor: pointer;
+}
+.bt-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--blue);
+  cursor: pointer;
+}
+.bt-range::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--blue);
+  border: none;
+  cursor: pointer;
+}
+.bt-range-val {
+  min-width: 24px;
+  text-align: right;
+  font-size: 13px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--blue);
+}
+
 .bt-intro {
   font-size: 11px; color: var(--txt3);
   margin-bottom: 8px; line-height: 1.5;
