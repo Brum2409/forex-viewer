@@ -40,16 +40,12 @@ async function doRefresh() {
   setStatus("Updating…", true);
 
   try {
-    const { rates, prevRates } = await fetchYahooQuotes();
+    const { rates, prevRates } = await fetchFrankfurterQuotes();
     S.rates     = rates;
     S.prevRates = prevRates;
     S.lastTs    = new Date();
 
-    // Fetch 7-day sparklines in background (best-effort, non-blocking)
-    Promise.allSettled(
-      CFG.PAIRS.map(p => fetchSparkline(p.f, p.t).catch(() => {}))
-    ).then(() => renderList());
-
+    // Sparklines are populated by fetchFrankfurterQuotes; render immediately
     renderList();
     const ts = S.lastTs.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
     setStatus(`Updated ${ts}`, true);
