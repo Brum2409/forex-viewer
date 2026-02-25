@@ -6,11 +6,12 @@
   <meta name="theme-color" content="#0D1117">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="Live forex rates updated every 15 minutes — optimized for mobile">
+  <meta name="description" content="Live forex rates — all data from Yahoo Finance">
   <title>FX Live — Forex Rates</title>
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="css/styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- TradingView Lightweight Charts — line & candlestick -->
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
 <body>
@@ -20,29 +21,22 @@
   <header class="header">
     <div class="header-brand">
       <div class="brand-icon">FX</div>
-      <div>
-        <div class="brand-text">FX Live</div>
-        <div class="brand-sub">Forex Market Rates</div>
-      </div>
+      <span class="brand-text">FX Live</span>
     </div>
-    <div class="header-actions">
-      <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()">
+    <div class="header-status">
+      <span class="live-dot" id="liveDot"></span>
+      <span id="statusTxt" class="status-txt">Loading…</span>
+      <span id="countdownTxt" class="countdown-txt"></span>
+      <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()" title="Refresh rates">
         <span class="spin-icon" id="spinIcon">↻</span>
-        <span id="refreshLabel">Refresh</span>
       </button>
     </div>
   </header>
 
-  <!-- ── Status ─────────────────────────────────────────── -->
-  <div class="status-bar">
-    <div><span class="live-dot" id="liveDot"></span><span id="statusTxt">Loading…</span></div>
-    <div id="countdownTxt"></div>
-  </div>
-
   <!-- ── Search ─────────────────────────────────────────── -->
   <div class="search-wrap">
     <input class="search-input" id="searchInput" type="search"
-      placeholder="Search pairs, e.g. EUR, JPY, GBP…"
+      placeholder="Search pairs — EUR, JPY, GBP…"
       oninput="onSearch(this.value)"
       autocomplete="off" spellcheck="false">
   </div>
@@ -57,11 +51,11 @@
 
   <!-- ── Detail slide-over ──────────────────────────────── -->
   <div class="detail" id="detail" role="dialog" aria-modal="true">
+
+    <!-- Header -->
     <div class="detail-header">
-      <button class="back-btn" onclick="closeDetail()" aria-label="Close">
-        ‹ Back
-      </button>
-      <div class="d-title">
+      <button class="back-btn" onclick="closeDetail()" aria-label="Close">←</button>
+      <div class="d-info">
         <div class="d-pair" id="dPair">—</div>
         <div class="d-full" id="dFull">—</div>
       </div>
@@ -71,32 +65,42 @@
       </div>
     </div>
 
-    <!-- Time interval buttons -->
-    <div class="periods">
-      <button class="period-btn active" data-iv="1m"  onclick="setChartInterval(this,'1m')">1m</button>
-      <button class="period-btn"        data-iv="5m"  onclick="setChartInterval(this,'5m')">5m</button>
-      <button class="period-btn"        data-iv="15m" onclick="setChartInterval(this,'15m')">15m</button>
-      <button class="period-btn"        data-iv="30m" onclick="setChartInterval(this,'30m')">30m</button>
-      <button class="period-btn"        data-iv="1h"  onclick="setChartInterval(this,'1h')">1h</button>
-      <button class="period-btn"        data-iv="2h"  onclick="setChartInterval(this,'2h')">2h</button>
-      <button class="period-btn"        data-iv="4h"  onclick="setChartInterval(this,'4h')">4h</button>
-      <button class="period-btn"        data-iv="1D"  onclick="setChartInterval(this,'1D')">1D</button>
-      <button class="period-btn"        data-iv="1W"  onclick="setChartInterval(this,'1W')">1W</button>
+    <!-- Chart toolbar: interval pills + line/candle toggle -->
+    <div class="chart-toolbar">
+      <div class="periods">
+        <button class="period-btn active" data-iv="1m"  onclick="setChartInterval(this,'1m')">1m</button>
+        <button class="period-btn"        data-iv="5m"  onclick="setChartInterval(this,'5m')">5m</button>
+        <button class="period-btn"        data-iv="15m" onclick="setChartInterval(this,'15m')">15m</button>
+        <button class="period-btn"        data-iv="30m" onclick="setChartInterval(this,'30m')">30m</button>
+        <button class="period-btn"        data-iv="1h"  onclick="setChartInterval(this,'1h')">1h</button>
+        <button class="period-btn"        data-iv="2h"  onclick="setChartInterval(this,'2h')">2h</button>
+        <button class="period-btn"        data-iv="4h"  onclick="setChartInterval(this,'4h')">4h</button>
+        <button class="period-btn"        data-iv="1D"  onclick="setChartInterval(this,'1D')">1D</button>
+        <button class="period-btn"        data-iv="1W"  onclick="setChartInterval(this,'1W')">1W</button>
+      </div>
+      <div class="type-toggle">
+        <button class="type-btn active" data-type="line"   onclick="setChartType('line')">Line</button>
+        <button class="type-btn"        data-type="candle" onclick="setChartType('candle')">Candle</button>
+      </div>
     </div>
 
+    <!-- Chart -->
     <div class="chart-wrap">
-      <canvas id="mainChart"></canvas>
+      <div id="chartContainer"></div>
       <div class="chart-loading" id="chartLoader" style="display:none">
         <div class="loader"></div>
       </div>
     </div>
 
+    <!-- OHLC stat pills -->
+    <div class="stats-row" id="statsRow"></div>
+
+    <!-- Scrollable body: timeframe grid -->
     <div class="detail-body">
-      <div class="multi-tf" id="multiTf"></div>
-      <div class="stats-grid" id="statsGrid"></div>
-      <div id="infoBlock"></div>
+      <div id="multiTf"></div>
     </div>
-  </div>
+
+  </div><!-- .detail -->
 
 </div><!-- .app -->
 

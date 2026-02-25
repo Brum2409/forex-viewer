@@ -41,25 +41,25 @@ const CFG = {
 };
 
 /* ============================================================
-   INTERVAL → YAHOO FINANCE / FRANKFURTER MAPPING
-   yfInterval: null means "use Frankfurter" (1D / 1W)
-   2h and 4h share the 1h YF fetch and aggregate client-side
+   INTERVAL → YAHOO FINANCE MAPPING
+   All intervals now use Yahoo Finance exclusively.
+   2h and 4h share the 1h YF fetch and aggregate client-side.
    ============================================================ */
 const INTERVAL_CONFIG = {
-  "1m":  { yfInterval: "1m",  yfRange: "1d",   groupMins: 1    },
-  "5m":  { yfInterval: "5m",  yfRange: "5d",   groupMins: 5    },
-  "15m": { yfInterval: "15m", yfRange: "60d",  groupMins: 15   },
-  "30m": { yfInterval: "30m", yfRange: "60d",  groupMins: 30   },
-  "1h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 60   },
-  "2h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 120  },
-  "4h":  { yfInterval: "1h",  yfRange: "730d", groupMins: 240  },
-  "1D":  { yfInterval: null,  yfRange: null,   groupMins: 1440 },
-  "1W":  { yfInterval: null,  yfRange: null,   groupMins: 10080},
+  "1m":  { yfInterval: "1m",  yfRange: "1d",   groupMins: 1     },
+  "5m":  { yfInterval: "5m",  yfRange: "5d",   groupMins: 5     },
+  "15m": { yfInterval: "15m", yfRange: "60d",  groupMins: 15    },
+  "30m": { yfInterval: "30m", yfRange: "60d",  groupMins: 30    },
+  "1h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 60    },
+  "2h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 120   },
+  "4h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 240   },
+  "1D":  { yfInterval: "1d",  yfRange: "2y",   groupMins: 1440  },
+  "1W":  { yfInterval: "1wk", yfRange: "10y",  groupMins: 10080 },
 };
 
 const INTERVAL_LABELS = {
-  "1m":"1 Minute", "5m":"5 Minute", "15m":"15 Minute", "30m":"30 Minute",
-  "1h":"1 Hour", "2h":"2 Hour", "4h":"4 Hour", "1D":"Daily", "1W":"Weekly",
+  "1m":"1m", "5m":"5m", "15m":"15m", "30m":"30m",
+  "1h":"1h", "2h":"2h", "4h":"4h", "1D":"1D", "1W":"1W",
 };
 
 // Cache TTL in ms per interval

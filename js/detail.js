@@ -1,18 +1,22 @@
 /* ============================================================
    DETAIL PANEL
    ============================================================ */
+let _chartType = 'line';           // 'line' | 'candle'
+let _chartResizeObserver = null;
+
 async function openDetail(f, t) {
   const p = CFG.PAIRS.find(x => x.f === f && x.t === t);
   if (!p) return;
   S.selected = p;
-  S.interval = "1m";
+  S.interval  = "1m";
+  _chartType  = 'line';
 
   // Populate header from cached rates
-  const rate = calcRate(S.rates, f, t);
-  const prev = S.prevRates[`${f}/${t}`];
-  const chgAbs = (rate != null && prev != null) ? rate - prev : null;
-  const chgPct = chgAbs != null ? (chgAbs / prev) * 100 : null;
-  const up = chgPct != null ? chgPct >= 0 : null;
+  const rate    = calcRate(S.rates, f, t);
+  const prev    = S.prevRates[`${f}/${t}`];
+  const chgAbs  = (rate != null && prev != null) ? rate - prev : null;
+  const chgPct  = chgAbs != null ? (chgAbs / prev) * 100 : null;
+  const up      = chgPct != null ? chgPct >= 0 : null;
 
   document.getElementById("dPair").textContent = `${f}/${t}`;
   document.getElementById("dFull").textContent = `${p.fn} / ${p.tn}`;
@@ -20,34 +24,39 @@ async function openDetail(f, t) {
 
   const dChg = document.getElementById("dChg");
   if (chgPct != null) {
-    dChg.textContent = `${up ? "▲" : "▼"} ${fmt(Math.abs(chgAbs), f, t)} (${up ? "+" : ""}${chgPct.toFixed(3)}%)`;
-    dChg.className = `d-chg ${up ? "up" : "down"}`;
+    dChg.textContent = `${up ? "▲" : "▼"} ${Math.abs(chgPct).toFixed(2)}%`;
+    dChg.className   = `d-chg ${up ? "up" : "down"}`;
   } else {
     dChg.textContent = "—";
-    dChg.className = "d-chg";
+    dChg.className   = "d-chg";
   }
 
   // Reset interval buttons
   document.querySelectorAll(".period-btn").forEach(b =>
     b.classList.toggle("active", b.dataset.iv === "1m"));
 
-  // Open panel
+  // Reset chart type buttons
+  document.querySelectorAll(".type-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.type === "line"));
+
   document.getElementById("detail").classList.add("open");
   document.body.style.overflow = "hidden";
 
-  // Show any already-cached timeframe data immediately
   renderMultiTimeframe(f, t);
-
   await loadChart(f, t, "1m");
 }
 
 function closeDetail() {
   document.getElementById("detail").classList.remove("open");
   document.body.style.overflow = "";
-  if (S.chart) { S.chart.destroy(); S.chart = null; }
-  document.getElementById("statsGrid").innerHTML = "";
-  document.getElementById("infoBlock").innerHTML = "";
-  document.getElementById("multiTf").innerHTML = "";
+  _destroyChart();
+  document.getElementById("statsRow").innerHTML  = "";
+  document.getElementById("multiTf").innerHTML   = "";
+}
+
+function _destroyChart() {
+  if (_chartResizeObserver) { _chartResizeObserver.disconnect(); _chartResizeObserver = null; }
+  if (S.chart) { S.chart.remove(); S.chart = null; }
 }
 
 async function setChartInterval(btn, interval) {
@@ -57,160 +66,164 @@ async function setChartInterval(btn, interval) {
   if (S.selected) await loadChart(S.selected.f, S.selected.t, interval);
 }
 
+function setChartType(type) {
+  _chartType = type;
+  document.querySelectorAll(".type-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.type === type));
+  if (S.selected) loadChart(S.selected.f, S.selected.t, S.interval);
+}
+
 /* ============================================================
-   CHART LOADING
-   Intraday (1m–4h) → Yahoo Finance (via CORS proxy)
-   1D / 1W → Frankfurter
+   CHART LOADING — uses LightweightCharts (TradingView)
+   Supports line (area) and candlestick modes.
    ============================================================ */
 async function loadChart(f, t, interval) {
-  const canvas = document.getElementById("mainChart");
-  const loader = document.getElementById("chartLoader");
-  loader.style.display = "flex";
-  canvas.style.opacity = "0";
+  const container = document.getElementById("chartContainer");
+  const loader    = document.getElementById("chartLoader");
+  loader.style.display   = "flex";
+  container.style.opacity = "0";
 
-  if (S.chart) { S.chart.destroy(); S.chart = null; }
-
-  const usesFrankfurter = interval === "1D" || interval === "1W";
+  _destroyChart();
 
   let data;
   try {
-    data = usesFrankfurter
-      ? await fetchFrankfurterChart(f, t, interval)
-      : await fetchYahooFinanceChart(f, t, interval);
+    data = await fetchYahooFinanceChart(f, t, interval);
   } catch (err) {
-    loader.style.display = "none";
-    canvas.style.opacity = "1";
-
-    document.getElementById("statsGrid").innerHTML =
-      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0;text-align:center">
-        Chart data unavailable. Check your connection and try again.
-      </div>`;
-    document.getElementById("infoBlock").innerHTML = "";
+    loader.style.display    = "none";
+    container.style.opacity = "1";
+    document.getElementById("statsRow").innerHTML =
+      `<div class="chart-err">Chart unavailable — check connection</div>`;
     return;
   }
 
-  loader.style.display = "none";
-  canvas.style.opacity = "1";
+  loader.style.display    = "none";
+  container.style.opacity = "1";
 
   if (!data || !data.length) {
-    document.getElementById("statsGrid").innerHTML =
-      `<div style="grid-column:1/-1;color:var(--txt2);padding:8px 0">No data for this interval.</div>`;
-    document.getElementById("infoBlock").innerHTML = "";
+    document.getElementById("statsRow").innerHTML =
+      `<div class="chart-err">No data available for this interval</div>`;
     return;
   }
 
-  const vals   = data.map(d => d.rate);
-  const open   = data[0].open  ?? vals[0];
-  const close  = vals[vals.length - 1];
-  const mn     = Math.min(...data.map(d => d.low  ?? d.rate));
-  const mx     = Math.max(...data.map(d => d.high ?? d.rate));
-  const chg    = close - open;
-  const chgPct = (chg / open) * 100;
-  const up     = chg >= 0;
+  const open  = data[0].open  ?? data[0].rate;
+  const close = data[data.length - 1].rate;
+  const mn    = Math.min(...data.map(d => d.low  ?? d.rate));
+  const mx    = Math.max(...data.map(d => d.high ?? d.rate));
+  const up    = close >= open;
+  const color = up ? "#3FB950" : "#F85149";
 
-  // Refresh multi-timeframe now that this interval's cache is populated
+  // Update multi-timeframe now that cache is populated
   renderMultiTimeframe(f, t);
 
-  // Stats grid
-  document.getElementById("statsGrid").innerHTML = `
-    <div class="stat-card">
-      <div class="stat-label">Open</div>
-      <div class="stat-val">${fmt(open, f, t)}</div>
+  // Stats pills (O/H/L/C)
+  document.getElementById("statsRow").innerHTML = `
+    <div class="stat-pill">
+      <span class="stat-l">O</span>
+      <span class="stat-v">${fmt(open, f, t)}</span>
     </div>
-    <div class="stat-card">
-      <div class="stat-label">Close</div>
-      <div class="stat-val" style="color:var(--${up?"green":"red"})">${fmt(close, f, t)}</div>
+    <div class="stat-pill stat-high">
+      <span class="stat-l">H</span>
+      <span class="stat-v">${fmt(mx, f, t)}</span>
     </div>
-    <div class="stat-card stat-low">
-      <div class="stat-label">Low</div>
-      <div class="stat-val" style="color:var(--red)">${fmt(mn, f, t)}</div>
+    <div class="stat-pill stat-low">
+      <span class="stat-l">L</span>
+      <span class="stat-v">${fmt(mn, f, t)}</span>
     </div>
-    <div class="stat-card stat-high">
-      <div class="stat-label">High</div>
-      <div class="stat-val" style="color:var(--green)">${fmt(mx, f, t)}</div>
-    </div>
-  `;
-
-  // Info block
-  document.getElementById("infoBlock").innerHTML = `
-    <div class="info-block">
-      <div class="info-title">${INTERVAL_LABELS[interval] || interval} Chart — ${f}/${t}</div>
-      <div class="info-row">
-        <span class="info-k">Change</span>
-        <span class="info-v" style="color:var(--${up?"green":"red"})">
-          ${up ? "▲" : "▼"} ${fmt(Math.abs(chg), f, t)} (${up?"+":""}${chgPct.toFixed(3)}%)
-        </span>
-      </div>
-      <div class="info-row">
-        <span class="info-k">Range</span>
-        <span class="info-v">${fmt(mx - mn, f, t)}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-k">Candles</span>
-        <span class="info-v">${data.length}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-k">Source</span>
-        <span class="info-v" style="color:var(--txt3)">${usesFrankfurter ? "Frankfurter / ECB" : "Yahoo Finance"}</span>
-      </div>
+    <div class="stat-pill">
+      <span class="stat-l">C</span>
+      <span class="stat-v" style="color:var(--${up?"green":"red"})">${fmt(close, f, t)}</span>
     </div>
   `;
 
-  // Build chart
-  const labels = data.map(d => fmtChartLabel(d.ts, interval));
-  const color  = up ? "#3FB950" : "#F85149";
-  const ctx    = canvas.getContext("2d");
+  // Determine price format
+  const isJPY   = f === "JPY" || t === "JPY";
+  const isLarge = close >= 100;
+  const precision = (isJPY || isLarge) ? 3 : 5;
+  const minMove   = Math.pow(10, -precision);
+  const showTime  = ['1m','5m','15m','30m','1h','2h','4h'].includes(interval);
 
-  S.chart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [{
-        data: vals,
-        borderColor: color,
-        backgroundColor: color + "18",
-        fill: true,
-        tension: 0.25,
-        pointRadius: data.length > 200 ? 0 : (data.length > 60 ? 1 : 2),
-        pointHoverRadius: 4,
-        borderWidth: 2,
-      }],
+  // Create LightweightCharts instance
+  S.chart = LightweightCharts.createChart(container, {
+    width:  container.clientWidth  || 380,
+    height: container.clientHeight || 280,
+    layout: {
+      background: { type: 'solid', color: 'transparent' },
+      textColor: '#6E7681',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontSize: 11,
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: "#1C2537",
-          borderColor: "#30363D",
-          borderWidth: 1,
-          titleColor: "#8B949E",
-          bodyColor: "#E6EDF3",
-          padding: 10,
-          cornerRadius: 8,
-          callbacks: {
-            title: ctx => ctx[0].label,
-            label: ctx => ` ${fmt(ctx.raw, f, t)}`,
-          },
-        },
-      },
-      scales: {
-        x: {
-          grid: { color: "#1C2537" },
-          ticks: { color: "#6E7681", maxTicksLimit: 6, maxRotation: 0, font: { size: 11 } },
-        },
-        y: {
-          position: "right",
-          grid: { color: "#1C2537" },
-          ticks: {
-            color: "#6E7681",
-            font: { size: 11 },
-            callback: v => fmt(v, f, t),
-          },
-        },
-      },
+    grid: {
+      vertLines: { color: '#1E2530' },
+      horzLines: { color: '#1E2530' },
     },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color: '#484E58', labelBackgroundColor: '#21262D' },
+      horzLine: { color: '#484E58', labelBackgroundColor: '#21262D' },
+    },
+    rightPriceScale: {
+      borderColor: '#30363D',
+      scaleMargins: { top: 0.08, bottom: 0.08 },
+    },
+    timeScale: {
+      borderColor: '#30363D',
+      timeVisible: showTime,
+      secondsVisible: false,
+      fixLeftEdge: true,
+    },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
+    handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
   });
+
+  // Prepare series data (sorted, deduplicated by time)
+  const seenTimes = new Set();
+  const chartData = data
+    .map(d => ({
+      time:  Math.floor(d.ts / 1000),
+      open:  d.open  ?? d.rate,
+      high:  d.high  ?? d.rate,
+      low:   d.low   ?? d.rate,
+      close: d.rate,
+      value: d.rate,
+    }))
+    .filter(d => { if (seenTimes.has(d.time)) return false; seenTimes.add(d.time); return true; })
+    .sort((a, b) => a.time - b.time);
+
+  const priceFormat = { type: 'price', precision, minMove };
+
+  if (_chartType === 'candle') {
+    const series = S.chart.addCandlestickSeries({
+      upColor:        '#3FB950',
+      downColor:      '#F85149',
+      borderUpColor:  '#3FB950',
+      borderDownColor:'#F85149',
+      wickUpColor:    '#3FB950',
+      wickDownColor:  '#F85149',
+      priceFormat,
+    });
+    series.setData(chartData.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })));
+  } else {
+    const series = S.chart.addAreaSeries({
+      topColor:         color + '28',
+      bottomColor:      color + '00',
+      lineColor:        color,
+      lineWidth:        2,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius:  4,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      priceFormat,
+    });
+    series.setData(chartData.map(d => ({ time: d.time, value: d.value })));
+  }
+
+  S.chart.timeScale().fitContent();
+
+  // Handle container resize
+  _chartResizeObserver = new ResizeObserver(() => {
+    if (S.chart && container.clientWidth > 0) {
+      S.chart.resize(container.clientWidth, container.clientHeight);
+    }
+  });
+  _chartResizeObserver.observe(container);
 }

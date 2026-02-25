@@ -25,7 +25,7 @@ function updateCountdown() {
   const m = Math.floor(S.countdown / 60);
   const s = S.countdown % 60;
   document.getElementById("countdownTxt").textContent =
-    `Next: ${m}:${String(s).padStart(2,"0")}`;
+    `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function setStatus(txt, ok = true) {
@@ -40,30 +40,18 @@ async function doRefresh() {
   setStatus("Updating…", true);
 
   try {
-    const [currentRates, prevData] = await Promise.all([
-      fetchCurrentRates(),
-      fetchPrevClose(),
-    ]);
+    const { rates, prevRates } = await fetchYahooQuotes();
+    S.rates     = rates;
+    S.prevRates = prevRates;
+    S.lastTs    = new Date();
 
-    S.rates = currentRates;
-    S.lastTs = new Date();
-
-    if (prevData) {
-      S.prevRates = {};
-      CFG.PAIRS.forEach(p => {
-        const fxR = { ...prevData.rates, USD: 1 };
-        const v = calcRate(fxR, p.f, p.t);
-        if (v) S.prevRates[`${p.f}/${p.t}`] = v;
-      });
-    }
-
-    // Pre-fetch 7-day sparklines (best-effort, parallel)
+    // Fetch 7-day sparklines in background (best-effort, non-blocking)
     Promise.allSettled(
-      CFG.PAIRS.map(p => fetchHistorical(p.f, p.t, 7).catch(() => {}))
+      CFG.PAIRS.map(p => fetchSparkline(p.f, p.t).catch(() => {}))
     ).then(() => renderList());
 
     renderList();
-    const ts = S.lastTs.toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" });
+    const ts = S.lastTs.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
     setStatus(`Updated ${ts}`, true);
     startCountdown();
 
@@ -72,7 +60,7 @@ async function doRefresh() {
 
   } catch (err) {
     console.error("Refresh failed:", err);
-    setStatus("Update failed — retrying…", false);
+    setStatus("Update failed", false);
 
     if (!Object.keys(S.rates).length) {
       document.getElementById("mainContent").innerHTML = `
@@ -101,18 +89,16 @@ function manualRefresh() {
    ============================================================ */
 let _touchX = 0;
 const detailEl = document.getElementById("detail");
-detailEl.addEventListener("touchstart", e => { _touchX = e.touches[0].clientX; }, { passive:true });
-detailEl.addEventListener("touchend", e => {
+detailEl.addEventListener("touchstart", e => { _touchX = e.touches[0].clientX; }, { passive: true });
+detailEl.addEventListener("touchend",   e => {
   if (e.changedTouches[0].clientX - _touchX > 70) closeDetail();
-}, { passive:true });
+}, { passive: true });
 
 /* ============================================================
    KEYBOARD
    ============================================================ */
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") {
-    closeDetail();
-  }
+  if (e.key === "Escape") closeDetail();
 });
 
 /* ============================================================
