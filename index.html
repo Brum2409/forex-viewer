@@ -817,10 +817,14 @@ function fmtChartLabel(ts, interval) {
    Fetches OHLCV bars for a YF symbol (e.g. "EURUSD=X").
    Returns [{ts, price, open, high, low}] sorted ascending.
    ============================================================ */
+// Free CORS proxy — swap this constant if the proxy goes down
+const CORS_PROXY = "https://corsproxy.io/?";
+
 async function yahooFetch(symbol, yfInterval, yfRange) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/`
-            + `${encodeURIComponent(symbol)}`
-            + `?interval=${yfInterval}&range=${yfRange}`;
+  const target = `https://query1.finance.yahoo.com/v8/finance/chart/`
+               + `${encodeURIComponent(symbol)}`
+               + `?interval=${yfInterval}&range=${yfRange}`;
+  const url = CORS_PROXY + encodeURIComponent(target);
   const res = await fetch(url, { cache: "no-cache" });
   if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status}`);
   const j = await res.json();
