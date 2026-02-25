@@ -7,9 +7,9 @@
 
 const BT = {
   WARMUP:    200,  // bars for EMA200 + indicator warm-up
-  ATR_SL:    1.5,  // stop-loss = ATR × this
+  ATR_SL:    2.0,  // stop-loss = ATR × this (wider to survive daily noise)
   RR:        2.0,  // take-profit = SL distance × R:R
-  MIN_SCORE: 25,   // minimum |confidence score| to open a trade
+  MIN_SCORE: 50,   // minimum |confidence score| to open a trade (requires strong confluence)
 };
 
 /* Neutral placeholders so calcConfidenceScore only scores the
@@ -44,13 +44,16 @@ function _btSignal(candles, pipSize) {
     currentPrice, pipSize
   );
 
-  return { ...conf, atr: ind.atr };
+  // Return ema200 so the walk-forward loop can apply the trend filter
+  return { ...conf, atr: ind.atr, ema200: ind.ema200 };
 }
 
 /* ── Walk-forward simulation ─────────────────────────────── */
-function _walkForward(candles, pipSize) {
-  const trades   = [];
-  let   position = null;
+// minScore: override BT.MIN_SCORE (used when user changes the setting slider)
+function _walkForward(candles, pipSize, minScore) {
+  const threshold = (minScore != null ? minScore : BT.MIN_SCORE);
+  const trades    = [];
+  let   position  = null;
 
   for (let i = BT.WARMUP; i < candles.length - 1; i++) {
     const next = candles[i + 1];
@@ -75,6 +78,8 @@ function _walkForward(candles, pipSize) {
           : (position.entry - exitPrice) / pipSize;
         trades.push({ ...position, exit: exitPrice, exitType, pips, exitBar: i + 1 });
         position = null;
+        // Skip to next bar — don't open a new trade on the same bar we just exited
+        continue;
       } else {
         continue; // still in trade — skip signal check
       }
@@ -82,7 +87,7 @@ function _walkForward(candles, pipSize) {
 
     /* ── Generate signal ────────────────────────────── */
     const sig = _btSignal(candles.slice(0, i + 1), pipSize);
-    if (!sig || Math.abs(sig.score) < BT.MIN_SCORE) continue;
+    if (!sig || Math.abs(sig.score) < threshold) continue;
 
     const direction = sig.recommendation.includes('BUY')  ? 'LONG'
                     : sig.recommendation.includes('SELL') ? 'SHORT'
@@ -92,6 +97,16 @@ function _walkForward(candles, pipSize) {
     const entry  = next.open ?? next.rate;
     const slDist = sig.atr * BT.ATR_SL;
     if (!slDist) continue; // skip if ATR unavailable
+
+    /* ── EMA200 trend filter ──────────────────────────
+       Only take LONG trades when price is above the 200-period EMA
+       (in an uptrend), and only SHORT trades when price is below it
+       (in a downtrend). This prevents trading against the major trend
+       which is the primary driver of the poor win rate. */
+    if (sig.ema200 != null) {
+      if (direction === 'LONG'  && entry < sig.ema200) continue;
+      if (direction === 'SHORT' && entry > sig.ema200) continue;
+    }
 
     const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
     const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
@@ -164,7 +179,7 @@ function _btStats(trades) {
 }
 
 /* ── Public: single-pair backtest ─────────────────────────── */
-async function runBacktest(f, t) {
+async function runBacktest(f, t, minScore) {
   const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
   const candles = await fetchYahooFinanceChart(f, t, '1D');
 
@@ -172,13 +187,13 @@ async function runBacktest(f, t) {
     return { error: `Need ≥ ${BT.WARMUP + 20} daily bars; got ${candles ? candles.length : 0}` };
   }
 
-  const trades = _walkForward(candles, pipSize);
+  const trades = _walkForward(candles, pipSize, minScore);
   const stats  = _btStats(trades) || { totalTrades: 0, profitabilityScore: 0 };
-  return { ...stats, pair: `${f}/${t}`, bars: candles.length - BT.WARMUP };
+  return { ...stats, pair: `${f}/${t}`, bars: candles.length - BT.WARMUP, minScore: minScore != null ? minScore : BT.MIN_SCORE };
 }
 
 /* ── Public: auto-test all configured pairs ──────────────── */
-async function runAutoBacktest(progressCb) {
+async function runAutoBacktest(progressCb, minScore) {
   const pairs   = CFG.PAIRS.slice(0, 12); // cap to avoid rate limits
   const results = [];
 
@@ -186,7 +201,7 @@ async function runAutoBacktest(progressCb) {
     const { f, t } = pairs[i];
     if (progressCb) progressCb(i, pairs.length, `${f}/${t}`);
     try {
-      const res = await runBacktest(f, t);
+      const res = await runBacktest(f, t, minScore);
       if (!res.error) results.push(res);
     } catch (_) { /* skip failed pairs */ }
     if (i < pairs.length - 1) await new Promise(r => setTimeout(r, 400));
@@ -198,7 +213,7 @@ async function runAutoBacktest(progressCb) {
   const totalPips  = results.reduce((s, r) => s + parseFloat(r.totalPips  || 0), 0).toFixed(1);
   const avgWinRate = (results.reduce((s, r) => s + parseFloat(r.winRate || 0), 0) / results.length).toFixed(1);
 
-  return { pairs: results, avgScore, totalPips, avgWinRate };
+  return { pairs: results, avgScore, totalPips, avgWinRate, minScore: minScore != null ? minScore : BT.MIN_SCORE };
 }
 
 /* ============================================================
@@ -271,12 +286,14 @@ function _buildBacktestResult(result, f, t) {
     </div>`;
   }).join('');
 
+  const activeMinScore = result.minScore != null ? result.minScore : BT.MIN_SCORE;
+
   return `
     <div class="bt-score-wrap">
       <div class="bt-score-num ${scoreCls}">${profitabilityScore}</div>
       <div class="bt-score-meta">
         <div class="bt-score-label ${scoreCls}">${scoreLabel}</div>
-        <div class="bt-score-sub">${bars} bars tested · daily signals</div>
+        <div class="bt-score-sub">${bars} bars · min score ${activeMinScore} · EMA200 filter</div>
       </div>
       <div class="bt-score-bar-track">
         <div class="bt-score-bar-fill ${scoreCls}" style="width:${profitabilityScore}%"></div>
@@ -374,15 +391,30 @@ function _buildAutoBacktestResult(result) {
 }
 
 /* ── DOM interaction ─────────────────────────────────────── */
+
+// Read current MIN_SCORE from the settings slider (or fall back to default)
+function _getBTMinScore() {
+  const el = document.getElementById('bt-min-score');
+  return el ? parseInt(el.value, 10) : BT.MIN_SCORE;
+}
+
+// Called when the slider moves — updates the display label and saves to localStorage
+function _onBTScoreChange(val) {
+  const el = document.getElementById('bt-min-score-val');
+  if (el) el.textContent = val;
+  localStorage.setItem('bt_min_score', val);
+}
+
 async function _launchBacktest(f, t) {
   const container = document.getElementById('bt-result');
   if (!container) return;
+  const minScore = _getBTMinScore();
   container.innerHTML = `<div class="analysis-loading">
     <div class="loader"></div>
-    <span>Running walk-forward simulation…</span>
+    <span>Running walk-forward simulation (min score: ${minScore})…</span>
   </div>`;
   try {
-    const result = await runBacktest(f, t);
+    const result = await runBacktest(f, t, minScore);
     container.innerHTML = _buildBacktestResult(result, f, t);
   } catch (err) {
     container.innerHTML = `<div class="analysis-error">Backtest failed: ${err.message}</div>
@@ -393,6 +425,7 @@ async function _launchBacktest(f, t) {
 async function _launchAutoBacktest() {
   const container = document.getElementById('bt-auto-result');
   if (!container) return;
+  const minScore = _getBTMinScore();
   container.innerHTML = `<div class="analysis-loading">
     <div class="loader"></div>
     <span id="bt-auto-progress">Fetching pair 1…</span>
@@ -404,7 +437,7 @@ async function _launchAutoBacktest() {
   };
 
   try {
-    const result = await runAutoBacktest(onProgress);
+    const result = await runAutoBacktest(onProgress, minScore);
     container.innerHTML = _buildAutoBacktestResult(result);
   } catch (err) {
     container.innerHTML = `<div class="analysis-error">Auto-test failed: ${err.message}</div>`;
@@ -413,13 +446,30 @@ async function _launchAutoBacktest() {
 
 /* ── Entry point called from detail.js ───────────────────── */
 function appendBacktestSection(panel, f, t) {
+  const savedScore = parseInt(localStorage.getItem('bt_min_score') || BT.MIN_SCORE, 10);
   const section = document.createElement('div');
   section.className = 'analysis-section';
   section.innerHTML = `
     <div class="analysis-section-title">Strategy Backtest</div>
+
+    <div class="bt-settings">
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-min-score">
+          Min. Confidence Score
+          <span class="bt-setting-hint">Higher = fewer but stronger signals</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-min-score" class="bt-range"
+                 min="25" max="80" value="${savedScore}" step="5"
+                 oninput="_onBTScoreChange(this.value)">
+          <span id="bt-min-score-val" class="bt-range-val">${savedScore}</span>
+        </div>
+      </div>
+    </div>
+
     <div class="bt-intro">
-      Walk-forward simulation on ~1 yr of daily candles.
-      ATR stop (${BT.ATR_SL}×) · ${BT.RR}:1 R:R · min score ${BT.MIN_SCORE}.
+      Walk-forward on ~2 yrs of daily candles · ATR stop (${BT.ATR_SL}×) ·
+      ${BT.RR}:1 R:R · EMA200 trend filter active.
     </div>
     <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">
       Run Backtest
@@ -428,8 +478,9 @@ function appendBacktestSection(panel, f, t) {
   panel.appendChild(section);
 }
 
-window.runBacktest        = runBacktest;
-window.runAutoBacktest    = runAutoBacktest;
-window._launchBacktest    = _launchBacktest;
-window._launchAutoBacktest = _launchAutoBacktest;
+window.runBacktest           = runBacktest;
+window.runAutoBacktest       = runAutoBacktest;
+window._launchBacktest       = _launchBacktest;
+window._launchAutoBacktest   = _launchAutoBacktest;
 window.appendBacktestSection = appendBacktestSection;
+window._onBTScoreChange      = _onBTScoreChange;

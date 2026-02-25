@@ -638,14 +638,14 @@ function detectCandlestickPatterns(candles) {
 //   Bias (weekly/daily/4H): ±25/20/15
 //   Triple TF confluence bonus: ±10
 //   EMA 50/200 cross (daily): ±8
-//   RSI overbought/oversold (daily): ±10  mid-zone: ±4
+//   RSI overbought/oversold (daily): ±10 with trend (±5 countertrend), mid-zone: ±4
 //   RSI divergence (daily): ±8
 //   MACD crossover (daily): ±8  sustained momentum: ±4
 //   MACD above/below zero (daily): ±3
 //   Fibonacci key level (daily): ±6 (61.8% → ±8)
 //   4H RSI extreme: ±5
 //   4H MACD crossover: ±5
-//   Zone proximity (per TF): near ±8, inside ±5
+//   Zone proximity (per TF, trend-aware): near ±10/±5 (trend-aligned/counter)
 //   H&S patterns: ±10
 //   Candlestick patterns 4H: ±5 each, max ±10
 //   Candlestick patterns Daily: ±4 each, max ±8
@@ -670,6 +670,10 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
   if (allBiases.every(b => b === 'BULLISH')) add(10,  'Triple Bullish Confluence', 'All TFs Aligned');
   if (allBiases.every(b => b === 'BEARISH')) add(-10, 'Triple Bearish Confluence', 'All TFs Aligned');
 
+  // Daily bias used for trend-aware sub-scoring below
+  const dailyBias     = biases.daily && biases.daily.bias;    // 'BULLISH'|'BEARISH'|'NEUTRAL'
+  const dailyEmaSignal = biases.daily && biases.daily.emaSignal; // 'ABOVE'|'BELOW'|'NEAR'|'UNKNOWN'
+
   // ── Daily indicators ────────────────────────────────────
   const dInd = indicators && indicators.daily;
   if (dInd) {
@@ -677,11 +681,21 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
     if (dInd.emaCross === 'GOLDEN') add(8,  'Daily EMA Cross', 'Golden (50 > 200)');
     if (dInd.emaCross === 'DEATH')  add(-8, 'Daily EMA Cross', 'Death (50 < 200)');
 
-    // RSI
-    if      (dInd.rsiState === 'OVERSOLD')   add(10,  'Daily RSI', `${dInd.rsi != null ? dInd.rsi.toFixed(1) : '—'} — Oversold`);
-    else if (dInd.rsiState === 'OVERBOUGHT') add(-10, 'Daily RSI', `${dInd.rsi != null ? dInd.rsi.toFixed(1) : '—'} — Overbought`);
-    else if (dInd.rsiState === 'LOW')        add(4,   'Daily RSI', `${dInd.rsi != null ? dInd.rsi.toFixed(1) : '—'} — Low Zone`);
-    else if (dInd.rsiState === 'HIGH')       add(-4,  'Daily RSI', `${dInd.rsi != null ? dInd.rsi.toFixed(1) : '—'} — High Zone`);
+    // RSI — trend-aware: extreme readings aligned with trend score higher;
+    // countertrend extremes score half (they indicate potential reversal only,
+    // not continuation, and carry higher risk of being faded further).
+    const rsiDisp = dInd.rsi != null ? dInd.rsi.toFixed(1) : '—';
+    if (dInd.rsiState === 'OVERSOLD') {
+      const trendAligned = dailyBias === 'BULLISH' || dailyEmaSignal === 'ABOVE';
+      add(trendAligned ? 10 : 5, 'Daily RSI', `${rsiDisp} — Oversold`);
+    } else if (dInd.rsiState === 'OVERBOUGHT') {
+      const trendAligned = dailyBias === 'BEARISH' || dailyEmaSignal === 'BELOW';
+      add(trendAligned ? -10 : -5, 'Daily RSI', `${rsiDisp} — Overbought`);
+    } else if (dInd.rsiState === 'LOW') {
+      add(4, 'Daily RSI', `${rsiDisp} — Low Zone`);
+    } else if (dInd.rsiState === 'HIGH') {
+      add(-4, 'Daily RSI', `${rsiDisp} — High Zone`);
+    }
 
     // RSI divergence
     if (dInd.rsiDivergence === 'BULLISH') add(8,  'RSI Divergence', 'Bullish Divergence');
@@ -714,21 +728,30 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
     if (h4Ind.macdState === 'BEARISH CROSS') add(-5, '4H MACD', 'Bearish Crossover');
   }
 
-  // ── Zone proximity ───────────────────────────────────────
+  // ── Zone proximity (trend-aware) ─────────────────────────
   // detectZones guarantees supply zones have bottom > currentPrice and
   // demand zones have top < currentPrice, so only proximity checks apply.
+  // Zones aligned with the daily trend score higher than countertrend zones.
   const nearPips = 10;
   for (const tf of ['weekly', 'daily', 'h4']) {
     const z = zones[tf];
     if (!z) continue;
     for (const zone of z.supply) {
       if (zone.bottom - currentPrice <= nearPips * pipSize) {
-        add(-8, `${tf.toUpperCase()} Near Supply`, `${zone.strength} touches`); break;
+        // Supply resistance: strongest when trend is already bearish
+        const pts = dailyBias === 'BEARISH' ? -10
+                  : dailyBias === 'BULLISH' ? -5
+                  : -8;
+        add(pts, `${tf.toUpperCase()} Near Supply`, `${zone.strength} touches`); break;
       }
     }
     for (const zone of z.demand) {
       if (currentPrice - zone.top <= nearPips * pipSize) {
-        add(8,  `${tf.toUpperCase()} Near Demand`, `${zone.strength} touches`); break;
+        // Demand support: strongest when trend is already bullish
+        const pts = dailyBias === 'BULLISH' ? 10
+                  : dailyBias === 'BEARISH' ? 5
+                  : 8;
+        add(pts,  `${tf.toUpperCase()} Near Demand`, `${zone.strength} touches`); break;
       }
     }
   }
