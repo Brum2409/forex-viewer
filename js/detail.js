@@ -321,7 +321,7 @@ function _triggerAnalysis(f, t) {
    ANALYSIS PANEL RENDERING
    ============================================================ */
 function _renderAnalysisPanel(panel, result, f, t) {
-  const { biases, zones, hsPatterns, candlePatterns, confidence } = result;
+  const { biases, zones, hsPatterns, candlePatterns, indicators, confidence } = result;
 
   const rec    = confidence && confidence.recommendation ? confidence.recommendation : 'NEUTRAL';
   const score  = confidence && confidence.score != null  ? confidence.score : 0;
@@ -333,16 +333,21 @@ function _renderAnalysisPanel(panel, result, f, t) {
     if (!b) return '';
     const cls  = b.bias === 'BULLISH' ? 'bias-bull' : b.bias === 'BEARISH' ? 'bias-bear' : 'bias-neut';
     const icon = b.bias === 'BULLISH' ? '▲' : b.bias === 'BEARISH' ? '▼' : '–';
+    const crossBadge = b.emaCross === 'GOLDEN' ? '<span class="cross-badge cross-golden">GX</span>'
+                     : b.emaCross === 'DEATH'  ? '<span class="cross-badge cross-death">DX</span>'
+                     : '';
     return `
       <div class="bias-row">
         <span class="bias-tf">${tf.toUpperCase()}</span>
         <span class="bias-structure">${b.structure || '—'}</span>
         <span class="bias-ema">EMA ${b.emaSignal || '—'}</span>
+        ${crossBadge}
         <span class="bias-badge ${cls}">${icon} ${b.bias}</span>
       </div>`;
   }).join('');
 
-  const zonePills  = _buildZonePills(zones, result.currentPrice, result.pipSize, f, t);
+  const indSection  = _buildIndicatorSection(indicators, result.pipSize);
+  const zonePills   = _buildZonePills(zones, result.currentPrice, result.pipSize, f, t);
   const patternList = _buildPatternList(hsPatterns, candlePatterns);
 
   const factorRows = ((confidence && confidence.factors) || []).map(fac => {
@@ -350,7 +355,7 @@ function _renderAnalysisPanel(panel, result, f, t) {
     const cls = fac.points > 0 ? 'factor-pos' : fac.points < 0 ? 'factor-neg' : 'factor-neu';
     return `<div class="factor-row">
       <span class="factor-label">${fac.label}</span>
-      <span class="factor-value">${fac.value}</span>
+      <span class="factor-value">${fac.value || ''}</span>
       <span class="factor-pts ${cls}">${pts}</span>
     </div>`;
   }).join('');
@@ -373,6 +378,8 @@ function _renderAnalysisPanel(panel, result, f, t) {
         <div class="bias-table">${biasRows}</div>
       </div>
 
+      ${indSection}
+
       <div class="analysis-section">
         <div class="analysis-section-title">Supply &amp; Demand Zones</div>
         ${zonePills}
@@ -388,6 +395,105 @@ function _renderAnalysisPanel(panel, result, f, t) {
         <div class="factor-table">${factorRows || '<div class="analysis-empty">No data</div>'}</div>
       </div>
 
+    </div>`;
+}
+
+function _buildIndicatorSection(indicators, pipSize) {
+  const ind = indicators && indicators.daily;
+  if (!ind) return '';
+
+  function indCls(state, bullStates, bearStates) {
+    if (bullStates.includes(state)) return 'ind-bull';
+    if (bearStates.includes(state)) return 'ind-bear';
+    return 'ind-neut';
+  }
+
+  // RSI cell
+  const rsiVal = ind.rsi != null ? ind.rsi.toFixed(1) : '—';
+  const rsiCls = indCls(ind.rsiState, ['OVERSOLD', 'LOW'], ['OVERBOUGHT', 'HIGH']);
+  const rsiLbl = ind.rsiState === 'OVERBOUGHT' ? 'OVERBOUGHT'
+               : ind.rsiState === 'OVERSOLD'   ? 'OVERSOLD'
+               : ind.rsiState === 'HIGH'        ? 'HIGH ZONE'
+               : ind.rsiState === 'LOW'         ? 'LOW ZONE'
+               : ind.rsiState === 'UNKNOWN'     ? '—'
+               : 'NEUTRAL';
+  const rsiDivBadge = ind.rsiDivergence !== 'NONE'
+    ? `<span class="div-badge ${ind.rsiDivergence === 'BULLISH' ? 'div-bull' : 'div-bear'}">${ind.rsiDivergence} DIV</span>`
+    : '';
+
+  // MACD cell
+  const macdSign = ind.macd != null ? (ind.macd >= 0 ? '+' : '') : '';
+  const macdDisp = ind.macd != null ? macdSign + ind.macd.toExponential(2) : '—';
+  const macdCls  = indCls(ind.macdState,
+    ['BULLISH CROSS', 'BULLISH'], ['BEARISH CROSS', 'BEARISH']);
+  const macdLbl  = ind.macdState === 'BULLISH CROSS' ? 'BULL CROSS'
+                 : ind.macdState === 'BEARISH CROSS' ? 'BEAR CROSS'
+                 : ind.macdState === 'BULLISH'        ? 'BULLISH'
+                 : ind.macdState === 'BEARISH'        ? 'BEARISH'
+                 : 'NEUTRAL';
+
+  // ATR cell
+  const atrDisp = ind.atrPips != null ? `${ind.atrPips} pips` : '—';
+  const atrLbl  = ind.atrPips == null  ? '—'
+                : ind.atrPips > 80    ? 'HIGH VOL'
+                : ind.atrPips > 40    ? 'MODERATE'
+                : 'LOW VOL';
+
+  // EMA cross cell
+  const crossVal = ind.ema50 != null && ind.ema200 != null
+    ? `50 ${ind.ema50 > ind.ema200 ? '>' : '<'} 200`
+    : '—';
+  const crossCls = ind.emaCross === 'GOLDEN' ? 'ind-bull'
+                 : ind.emaCross === 'DEATH'  ? 'ind-bear'
+                 : 'ind-neut';
+  const crossLbl = ind.emaCross === 'GOLDEN' ? 'GOLDEN X'
+                 : ind.emaCross === 'DEATH'  ? 'DEATH X'
+                 : '—';
+
+  // Fibonacci cell
+  let fibVal = '—', fibCls = 'ind-neut', fibLbl = '—';
+  if (ind.fib) {
+    const nl = ind.fib.nearestLevel;
+    fibVal = nl ? `${nl.label}%` : '—';
+    if (ind.fib.signal) {
+      fibCls = ind.fib.signal.direction === 'BULLISH' ? 'ind-bull' : 'ind-bear';
+      fibLbl = `${ind.fib.signal.level}% ${ind.fib.signal.type}`;
+    } else {
+      fibLbl = ind.fib.trend === 'UP' ? 'UPTREND' : 'DOWNTREND';
+    }
+  }
+
+  return `
+    <div class="analysis-section">
+      <div class="analysis-section-title">Oscillators &amp; Momentum (Daily)</div>
+      <div class="ind-grid">
+        <div class="ind-cell">
+          <span class="ind-name">RSI (14)</span>
+          <span class="ind-val ${rsiCls}">${rsiVal}</span>
+          <span class="ind-lbl ${rsiCls}">${rsiLbl}</span>
+          ${rsiDivBadge}
+        </div>
+        <div class="ind-cell">
+          <span class="ind-name">MACD (12/26/9)</span>
+          <span class="ind-val ${macdCls}">${macdDisp}</span>
+          <span class="ind-lbl ${macdCls}">${macdLbl}</span>
+        </div>
+        <div class="ind-cell">
+          <span class="ind-name">EMA Cross</span>
+          <span class="ind-val ${crossCls}">${crossVal}</span>
+          <span class="ind-lbl ${crossCls}">${crossLbl}</span>
+        </div>
+        <div class="ind-cell">
+          <span class="ind-name">ATR (14)</span>
+          <span class="ind-val ind-neut">${atrDisp}</span>
+          <span class="ind-lbl ind-neut">${atrLbl}</span>
+        </div>
+        <div class="ind-cell ind-cell-wide">
+          <span class="ind-name">Fibonacci</span>
+          <span class="ind-val ${fibCls}">${fibVal}</span>
+          <span class="ind-lbl ${fibCls}">${fibLbl}</span>
+        </div>
+      </div>
     </div>`;
 }
 
