@@ -888,3 +888,27 @@ input  { font-family: inherit; }
 }
 .cross-golden { color: #F0C040; background: rgba(240,192,64,0.12); }
 .cross-death  { color: var(--red); background: var(--red-dim); }
+
+/* ── Trade Log Table ─────────────────────────────────────── */
+.bt-trade-log-container {
+  display: grid;
+  grid-template-columns: 80px 80px 70px 1fr 1fr 1fr 1fr 1fr 70px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.bt-log-header, .bt-log-row {
+  display: contents; /* Allow children to be direct grid items */
+}
+.bt-log-header > span, .bt-log-row > span {
+  padding: 6px 4px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bt-log-header > span { font-weight: bold; text-align: center; }
+.bt-log-row.bt-tr-win > span { color: var(--green); }
+.bt-log-row.bt-tr-loss > span { color: var(--red); }
+.bt-log-row > span:nth-child(3) { text-align: left; }
