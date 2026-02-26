@@ -9,11 +9,16 @@ const BT_DEFAULTS = {
   WARMUP:         200,   // bars for EMA200 + indicator warm-up
   ATR_SL:         2.0,   // stop-loss = ATR × this
   RR:             2.0,   // take-profit = SL distance × R:R
-  MIN_SCORE:      55,    // minimum |confidence score| to open a trade (raised for quality)
+  MIN_SCORE:      50,    // minimum |confidence score| to open a trade
   USE_TREND_FILTER: true, // apply EMA200 + weekly trend filter
   USE_TRAILING_STOP: false, // use a trailing stop-loss
   TSL_FACTOR:       1.5,   // trailing stop ATR factor
   TSL_TRIGGER_RR:   1.0,   // R:R multiple to activate trailing stop
+  // ── Entry quality filters ────────────────────────────────
+  REQUIRE_WEEKLY_ALIGN:  false,   // require weekly bias to match direction (no NEUTRAL)
+  REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
+  RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
+  MACD_CONFIRM:          false,   // daily MACD histogram must align with trade direction
 };
 
 // Global BT object to hold current settings
@@ -65,7 +70,10 @@ function _btSignal(candles, pipSize) {
   const currentPrice = candles[candles.length - 1].rate;
 
   const conf = calcConfidenceScore(
-    { weekly: wBias, daily: bias, h4: _BT_NEUTRAL_BIAS, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
+    // h4 uses daily bias as proxy: daily and 4H trends are strongly correlated
+    // at end-of-day and we have no intraday data in this daily backtest.
+    // h2/h1/m30 stay neutral to avoid triggering artificial confluence bonuses.
+    { weekly: wBias, daily: bias, h4: bias, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
     { weekly: _BT_EMPTY_ZONES, daily: zones, h4: _BT_EMPTY_ZONES },
     { weekly: _BT_NO_HS, daily: hs, h4: _BT_NO_HS },
     { daily: cp, h4: [], h2: [] },
@@ -73,7 +81,8 @@ function _btSignal(candles, pipSize) {
     currentPrice, pipSize
   );
 
-  return { ...conf, atr: ind.atr, ema200: ind.ema200, weeklyBias: wBias.bias, dailyRsi: ind.rsi };
+  return { ...conf, atr: ind.atr, ema200: ind.ema200, weeklyBias: wBias.bias,
+           dailyRsi: ind.rsi, dailyMacdHist: ind.histogram };
 }
 
 /* ── Walk-forward simulation ─────────────────────────────── */
@@ -135,25 +144,34 @@ function _walkForward(candles, pipSize) {
         const slDist = sig.atr * BT.ATR_SL;
 
         if (slDist) { // Skip if ATR is zero
-          // EMA200 trend filter (daily EMA200 on primary timeframe)
+          // EMA200 trend filter
           const emaOK = !BT.USE_TREND_FILTER || !sig.ema200 ||
             (direction === 'LONG'  && entry >= sig.ema200) ||
             (direction === 'SHORT' && entry <= sig.ema200);
 
-          // Weekly trend alignment filter — avoids counter-trend trades
-          // NEUTRAL weekly allows both directions; opposing weekly blocks trade
+          // Weekly alignment — REQUIRE_WEEKLY_ALIGN blocks NEUTRAL weekly too
           const weeklyOK = !BT.USE_TREND_FILTER || !sig.weeklyBias ||
-            sig.weeklyBias === 'NEUTRAL' ||
+            (!BT.REQUIRE_WEEKLY_ALIGN && sig.weeklyBias === 'NEUTRAL') ||
             (direction === 'LONG'  && sig.weeklyBias === 'BULLISH') ||
             (direction === 'SHORT' && sig.weeklyBias === 'BEARISH');
 
-          // RSI quality filter — avoid entering when daily RSI is extended
-          // against the trade direction (overbought on longs, oversold on shorts)
+          // RSI gate: NORMAL (68/32), STRICT (60/40), or OFF
+          const rsiLim = BT.RSI_FILTER === 'STRICT' ? { ob: 60, os: 40 }
+                       : BT.RSI_FILTER === 'OFF'    ? { ob: 100, os: 0  }
+                       :                              { ob: 68,  os: 32  };
           const rsiOK = sig.dailyRsi == null ||
-            (direction === 'LONG'  && sig.dailyRsi < 68) ||
-            (direction === 'SHORT' && sig.dailyRsi > 32);
+            (direction === 'LONG'  && sig.dailyRsi < rsiLim.ob) ||
+            (direction === 'SHORT' && sig.dailyRsi > rsiLim.os);
 
-          if (emaOK && weeklyOK && rsiOK) {
+          // Strong signal: only STRONG BUY / STRONG SELL (|score| >= 60)
+          const strongOK = !BT.REQUIRE_STRONG_SIGNAL || Math.abs(sig.score) >= 60;
+
+          // MACD confirmation: histogram must align with trade direction
+          const macdOK = !BT.MACD_CONFIRM || sig.dailyMacdHist == null ||
+            (direction === 'LONG'  && sig.dailyMacdHist > 0) ||
+            (direction === 'SHORT' && sig.dailyMacdHist < 0);
+
+          if (emaOK && weeklyOK && rsiOK && strongOK && macdOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
             position = { direction, entry, sl, tp, entryBar: i + 1,
@@ -318,8 +336,12 @@ function _buildBacktestResult(result, f, t) {
   const curveSvg = _drawEquityCurve(equityCurve);
 
   const settingsDesc = `min score ${BT.MIN_SCORE}` +
-    (BT.USE_TREND_FILTER ? ' · EMA200 filter' : '') +
-    (BT.USE_TRAILING_STOP ? ` · TSL (${BT.TSL_TRIGGER_RR}R, ${BT.TSL_FACTOR}×ATR)` : '');
+    (BT.USE_TREND_FILTER      ? ' · EMA200 filter'    : '') +
+    (BT.REQUIRE_WEEKLY_ALIGN  ? ' · weekly req.'      : '') +
+    (BT.REQUIRE_STRONG_SIGNAL ? ' · strong only'      : '') +
+    (BT.RSI_FILTER !== 'NORMAL' ? ` · RSI ${BT.RSI_FILTER.toLowerCase()}` : '') +
+    (BT.MACD_CONFIRM          ? ' · MACD confirm'     : '') +
+    (BT.USE_TRAILING_STOP     ? ` · TSL (${BT.TSL_TRIGGER_RR}R, ${BT.TSL_FACTOR}×ATR)` : '');
 
   const recentTrades = (trades || []).slice(-8).reverse().map(tr => {
     const cls  = tr.pips > 0 ? 'bt-tr-win' : tr.pips <= 0 ? 'bt-tr-loss' : '';
@@ -435,13 +457,17 @@ function _getBTSavedSetting(key, defaultValue) {
 }
 
 function _updateBTState() {
-    BT.MIN_SCORE = _getBTSavedSetting('min_score', BT_DEFAULTS.MIN_SCORE);
-    BT.ATR_SL = _getBTSavedSetting('atr_sl', BT_DEFAULTS.ATR_SL);
-    BT.RR = _getBTSavedSetting('rr', BT_DEFAULTS.RR);
-    BT.USE_TREND_FILTER = _getBTSavedSetting('use_trend_filter', BT_DEFAULTS.USE_TREND_FILTER);
-    BT.USE_TRAILING_STOP = _getBTSavedSetting('use_trailing_stop', BT_DEFAULTS.USE_TRAILING_STOP);
-    BT.TSL_FACTOR = _getBTSavedSetting('tsl_factor', BT_DEFAULTS.TSL_FACTOR);
-    BT.TSL_TRIGGER_RR = _getBTSavedSetting('tsl_trigger_rr', BT_DEFAULTS.TSL_TRIGGER_RR);
+    BT.MIN_SCORE             = _getBTSavedSetting('min_score',             BT_DEFAULTS.MIN_SCORE);
+    BT.ATR_SL                = _getBTSavedSetting('atr_sl',                BT_DEFAULTS.ATR_SL);
+    BT.RR                    = _getBTSavedSetting('rr',                    BT_DEFAULTS.RR);
+    BT.USE_TREND_FILTER      = _getBTSavedSetting('use_trend_filter',       BT_DEFAULTS.USE_TREND_FILTER);
+    BT.USE_TRAILING_STOP     = _getBTSavedSetting('use_trailing_stop',      BT_DEFAULTS.USE_TRAILING_STOP);
+    BT.TSL_FACTOR            = _getBTSavedSetting('tsl_factor',             BT_DEFAULTS.TSL_FACTOR);
+    BT.TSL_TRIGGER_RR        = _getBTSavedSetting('tsl_trigger_rr',         BT_DEFAULTS.TSL_TRIGGER_RR);
+    BT.REQUIRE_WEEKLY_ALIGN  = _getBTSavedSetting('require_weekly_align',   BT_DEFAULTS.REQUIRE_WEEKLY_ALIGN);
+    BT.REQUIRE_STRONG_SIGNAL = _getBTSavedSetting('require_strong_signal',  BT_DEFAULTS.REQUIRE_STRONG_SIGNAL);
+    BT.RSI_FILTER            = _getBTSavedSetting('rsi_filter',             BT_DEFAULTS.RSI_FILTER);
+    BT.MACD_CONFIRM          = _getBTSavedSetting('macd_confirm',           BT_DEFAULTS.MACD_CONFIRM);
 }
 
 function _onBTSettingChange(key, val) {
@@ -479,6 +505,288 @@ async function _launchAutoBacktest() {
     container.innerHTML = _buildAutoBacktestResult(result);
   } catch (err) {
     container.innerHTML = `<div class="analysis-error">Auto-test failed: ${err.message}</div>`;
+  }
+}
+
+/* ── Settings Optimizer ────────────────────────────────────
+   Pre-computes signals once per pair, then sweeps a parameter
+   grid in memory (no extra API calls) to find the settings
+   that best match the user's target (high win rate, low DD).
+   ────────────────────────────────────────────────────────── */
+
+// Precompute one signal per bar so the optimizer doesn't rerun
+// expensive indicator calculations for every parameter combo.
+function _precomputeBtSignals(candles, pipSize) {
+  const sigs = [];
+  for (let i = BT.WARMUP; i < candles.length - 1; i++) {
+    sigs.push(_btSignal(candles.slice(0, i + 1), pipSize));
+  }
+  return sigs; // sigs[j] → signal at bar (WARMUP + j)
+}
+
+// Walk-forward using precomputed signals + a custom settings object.
+// Omits trailing-stop logic for simplicity in the optimizer sweep.
+function _walkForwardFast(candles, sigs, pipSize, cfg) {
+  const { MIN_SCORE, ATR_SL, RR, USE_TREND_FILTER,
+          REQUIRE_WEEKLY_ALIGN, REQUIRE_STRONG_SIGNAL, RSI_FILTER, MACD_CONFIRM } = cfg;
+  const rsiLim = RSI_FILTER === 'STRICT' ? { ob: 60, os: 40 }
+               : RSI_FILTER === 'OFF'    ? { ob: 100, os: 0  }
+               :                          { ob: 68,  os: 32  };
+  const trades = [];
+  let pos = null;
+
+  for (let i = BT.WARMUP; i < candles.length - 1; i++) {
+    const sig  = sigs[i - BT.WARMUP];
+    const next = candles[i + 1];
+    const hi   = next.high ?? next.rate;
+    const lo   = next.low  ?? next.rate;
+
+    if (pos) {
+      let exitPrice = null, exitType = null;
+      if (pos.dir === 'LONG') {
+        if (lo  <= pos.sl) { exitPrice = pos.sl; exitType = 'SL'; }
+        else if (hi >= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
+      } else {
+        if (hi >= pos.sl) { exitPrice = pos.sl; exitType = 'SL'; }
+        else if (lo <= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
+      }
+      if (exitPrice !== null) {
+        const pips = pos.dir === 'LONG'
+          ? (exitPrice - pos.entry) / pipSize
+          : (pos.entry - exitPrice) / pipSize;
+        trades.push({ pips, exitType });
+        pos = null;
+      }
+    }
+
+    if (!pos && sig && Math.abs(sig.score) >= MIN_SCORE) {
+      const dir = sig.recommendation.includes('BUY')  ? 'LONG'
+                : sig.recommendation.includes('SELL') ? 'SHORT' : null;
+      if (dir) {
+        const entry  = next.open ?? next.rate;
+        const slDist = sig.atr * ATR_SL;
+        if (slDist) {
+          const emaOK    = !USE_TREND_FILTER || !sig.ema200 ||
+            (dir === 'LONG'  && entry >= sig.ema200) ||
+            (dir === 'SHORT' && entry <= sig.ema200);
+          const weeklyOK = !USE_TREND_FILTER || !sig.weeklyBias ||
+            (!REQUIRE_WEEKLY_ALIGN && sig.weeklyBias === 'NEUTRAL') ||
+            (dir === 'LONG'  && sig.weeklyBias === 'BULLISH') ||
+            (dir === 'SHORT' && sig.weeklyBias === 'BEARISH');
+          const rsiOK    = sig.dailyRsi == null ||
+            (dir === 'LONG'  && sig.dailyRsi < rsiLim.ob) ||
+            (dir === 'SHORT' && sig.dailyRsi > rsiLim.os);
+          const strongOK = !REQUIRE_STRONG_SIGNAL || Math.abs(sig.score) >= 60;
+          const macdOK   = !MACD_CONFIRM || sig.dailyMacdHist == null ||
+            (dir === 'LONG'  && sig.dailyMacdHist > 0) ||
+            (dir === 'SHORT' && sig.dailyMacdHist < 0);
+          if (emaOK && weeklyOK && rsiOK && strongOK && macdOK) {
+            const sl = dir === 'LONG' ? entry - slDist : entry + slDist;
+            const tp = dir === 'LONG' ? entry + slDist * RR : entry - slDist * RR;
+            pos = { dir, entry, sl, tp };
+          }
+        }
+      }
+    }
+  }
+
+  if (pos) {
+    const last = candles[candles.length - 1];
+    const pips = pos.dir === 'LONG'
+      ? (last.rate - pos.entry) / pipSize
+      : (pos.entry - last.rate) / pipSize;
+    trades.push({ pips, exitType: 'OPEN' });
+  }
+  return trades;
+}
+
+async function runOptimizer(progressCb) {
+  _updateBTState();
+
+  // ── Fetch & precompute signals for first 6 pairs ────────
+  const pairs    = CFG.PAIRS.slice(0, 6);
+  const pairData = [];
+  for (let pi = 0; pi < pairs.length; pi++) {
+    const { f, t } = pairs[pi];
+    if (progressCb) progressCb('fetch', pi, pairs.length, `${f}/${t}`);
+    try {
+      const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
+      const candles = await fetchYahooFinanceChart(f, t, '1D');
+      if (candles && candles.length >= BT.WARMUP + 20) {
+        const sigs = _precomputeBtSignals(candles, pipSize);
+        pairData.push({ candles, sigs, pipSize });
+      }
+    } catch (_) {}
+    if (pi < pairs.length - 1) await new Promise(r => setTimeout(r, 200));
+  }
+  if (!pairData.length) return { error: 'No pair data available' };
+
+  // ── Build parameter grid (6×4×4×2×2×2 = 768 combos) ────
+  const combos = [];
+  for (const MIN_SCORE of [25, 35, 45, 55, 65, 75]) {
+    for (const ATR_SL of [1.5, 2.0, 2.5, 3.0]) {
+      for (const RR of [1.5, 2.0, 2.5, 3.0]) {
+        for (const REQUIRE_WEEKLY_ALIGN of [false, true]) {
+          for (const MACD_CONFIRM of [false, true]) {
+            for (const RSI_FILTER of ['NORMAL', 'STRICT']) {
+              combos.push({ MIN_SCORE, ATR_SL, RR, USE_TREND_FILTER: true,
+                            REQUIRE_WEEKLY_ALIGN, REQUIRE_STRONG_SIGNAL: false,
+                            RSI_FILTER, MACD_CONFIRM });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Sweep all combinations ───────────────────────────────
+  const results = [];
+  for (let ci = 0; ci < combos.length; ci++) {
+    if (ci % 100 === 0) {
+      if (progressCb) progressCb('test', ci, combos.length, '');
+      await new Promise(r => setTimeout(r, 0)); // yield to UI
+    }
+    const cfg = combos[ci];
+    let totalTrades = 0, totalWins = 0, totalPips = 0, maxDD = 0, validPairs = 0;
+
+    for (const { candles, sigs, pipSize } of pairData) {
+      const trades = _walkForwardFast(candles, sigs, pipSize, cfg);
+      if (trades.length < 3) continue;
+      validPairs++;
+      totalTrades += trades.length;
+      totalWins   += trades.filter(t => t.pips > 0).length;
+      totalPips   += trades.reduce((s, t) => s + t.pips, 0);
+      let eq = 0, peak = 0;
+      for (const tr of trades) {
+        eq += tr.pips; peak = Math.max(peak, eq);
+        maxDD = Math.max(maxDD, peak - eq);
+      }
+    }
+
+    if (totalTrades >= 8 && validPairs >= 2) {
+      results.push({ cfg,
+        trades:  totalTrades,
+        winRate: Math.round(totalWins / totalTrades * 1000) / 10,
+        pips:    Math.round(totalPips),
+        maxDD:   Math.round(maxDD),
+      });
+    }
+  }
+
+  results.sort((a, b) => b.winRate - a.winRate || b.pips - a.pips);
+  return { results: results.slice(0, 30), totalTested: combos.length, pairsTested: pairData.length };
+}
+
+function _buildOptimizerResult(data, sortKey = 'winRate') {
+  if (data.error) return `<div class="analysis-error">${data.error}</div>`;
+  const { results, totalTested, pairsTested } = data;
+  if (!results || !results.length)
+    return `<div class="analysis-error">No valid combinations found (all filtered out — try reducing filter strictness)</div>`;
+
+  // sort a copy so we can re-sort without re-running
+  const sorted = [...results].sort((a, b) =>
+    sortKey === 'pips'   ? b.pips - a.pips || b.winRate - a.winRate :
+    sortKey === 'maxDD'  ? a.maxDD - b.maxDD || b.winRate - a.winRate :
+                           b.winRate - a.winRate || b.pips - a.pips);
+
+  const rsiLabel = r => r === 'STRICT' ? 'Strict' : r === 'OFF' ? 'Off' : 'Normal';
+  const tf  = b => b ? '✓' : '—';
+  const sortBtn = (key, label) =>
+    `<button class="bt-opt-sort ${sortKey === key ? 'active' : ''}" onclick="_reRenderOptimizer('${key}')">${label}</button>`;
+
+  const rows = sorted.map((r, i) => {
+    const wrCls  = r.winRate >= 60 ? 'bt-score-great' : r.winRate >= 50 ? 'bt-score-ok' : 'bt-score-poor';
+    const pipCls = r.pips >= 0 ? 'bt-pip-pos' : 'bt-pip-neg';
+    const cfgJson = JSON.stringify(r.cfg).replace(/"/g, '&quot;');
+    return `<div class="bt-opt-row">
+      <span class="bt-opt-rank">${i + 1}</span>
+      <span class="${wrCls} bt-opt-wr">${r.winRate}%</span>
+      <span class="${pipCls} bt-opt-pips">${r.pips >= 0 ? '+' : ''}${r.pips}p</span>
+      <span class="bt-opt-dd">-${r.maxDD}p</span>
+      <span class="bt-opt-n">${r.trades}</span>
+      <span class="bt-opt-cfg">${r.cfg.MIN_SCORE}</span>
+      <span class="bt-opt-cfg">${r.cfg.ATR_SL}×</span>
+      <span class="bt-opt-cfg">${r.cfg.RR}:1</span>
+      <span class="bt-opt-flag">${tf(r.cfg.REQUIRE_WEEKLY_ALIGN)}</span>
+      <span class="bt-opt-flag">${tf(r.cfg.MACD_CONFIRM)}</span>
+      <span class="bt-opt-cfg">${rsiLabel(r.cfg.RSI_FILTER)}</span>
+      <button class="bt-apply-btn" onclick="_applyOptimizerSettings(${cfgJson})">Apply</button>
+    </div>`;
+  }).join('');
+
+  return `<div class="bt-opt-wrap">
+    <div class="bt-opt-meta">Tested ${totalTested} combinations · ${pairsTested} pairs · top ${sorted.length} shown</div>
+    <div class="bt-opt-sortbar">Sort by: ${sortBtn('winRate','Win Rate')} ${sortBtn('pips','Pips')} ${sortBtn('maxDD','Min DrawDown')}</div>
+    <div class="bt-opt-head">
+      <span>#</span><span>Win%</span><span>Pips</span><span>MaxDD</span><span>Trades</span>
+      <span>Score</span><span>SL</span><span>RR</span>
+      <span>Wkly</span><span>MACD</span><span>RSI</span><span></span>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+// Cached optimizer data for re-sorting without re-running
+let _lastOptimizerData = null;
+function _reRenderOptimizer(sortKey) {
+  const container = document.getElementById('bt-optimizer-result');
+  if (container && _lastOptimizerData) {
+    container.innerHTML = _buildOptimizerResult(_lastOptimizerData, sortKey);
+  }
+}
+
+function _applyOptimizerSettings(cfg) {
+  localStorage.setItem('bt_min_score',             cfg.MIN_SCORE);
+  localStorage.setItem('bt_atr_sl',                cfg.ATR_SL);
+  localStorage.setItem('bt_rr',                    cfg.RR);
+  localStorage.setItem('bt_require_weekly_align',  cfg.REQUIRE_WEEKLY_ALIGN);
+  localStorage.setItem('bt_require_strong_signal', cfg.REQUIRE_STRONG_SIGNAL);
+  localStorage.setItem('bt_rsi_filter',            cfg.RSI_FILTER);
+  localStorage.setItem('bt_macd_confirm',          cfg.MACD_CONFIRM);
+  _updateBTState();
+
+  // Sync all UI controls
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  const setCb  = (id, val) => { const el = document.getElementById(id); if (el) el.checked = val; };
+  set('bt-min-score', cfg.MIN_SCORE);       setTxt('bt-min-score-val', cfg.MIN_SCORE);
+  set('bt-atr-sl',    cfg.ATR_SL);          setTxt('bt-atr-sl-val',    cfg.ATR_SL);
+  set('bt-rr',        cfg.RR);              setTxt('bt-rr-val',        cfg.RR);
+  setCb('bt-require-weekly-align',  cfg.REQUIRE_WEEKLY_ALIGN);
+  setCb('bt-require-strong-signal', cfg.REQUIRE_STRONG_SIGNAL);
+  set('bt-rsi-filter', cfg.RSI_FILTER);
+  setCb('bt-macd-confirm', cfg.MACD_CONFIRM);
+
+  const container = document.getElementById('bt-optimizer-result');
+  if (container) {
+    const note = document.createElement('div');
+    note.className = 'bt-opt-applied';
+    note.textContent = '✓ Settings applied — run Backtest to verify';
+    container.prepend(note);
+    setTimeout(() => note.remove(), 3000);
+  }
+}
+
+async function _launchOptimizer() {
+  const container = document.getElementById('bt-optimizer-result');
+  if (!container) return;
+  _updateBTState();
+  _lastOptimizerData = null;
+  container.innerHTML = `<div class="analysis-loading"><div class="loader"></div><span id="bt-opt-progress">Preparing…</span></div>`;
+
+  const onProgress = (phase, done, total, pair) => {
+    const el = document.getElementById('bt-opt-progress');
+    if (!el) return;
+    if (phase === 'fetch') el.textContent = `Fetching ${pair} (${done + 1}/${total})…`;
+    if (phase === 'test')  el.textContent = `Testing combinations ${done}/${total}…`;
+  };
+
+  try {
+    const result = await runOptimizer(onProgress);
+    _lastOptimizerData = result;
+    container.innerHTML = _buildOptimizerResult(result);
+  } catch (err) {
+    container.innerHTML = `<div class="analysis-error">Optimizer failed: ${err.message}</div>`;
   }
 }
 
@@ -551,12 +859,56 @@ function appendBacktestSection(panel, f, t) {
           <span id="bt-tsl-factor-val" class="bt-range-val">${BT.TSL_FACTOR}</span>
         </div>
       </div>
+
+      <div class="bt-setting-divider">Advanced Entry Filters</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-require-weekly-align">Require Weekly Alignment
+          <span class="bt-setting-hint">Block trades when weekly trend is unclear (NEUTRAL)</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-require-weekly-align" ${BT.REQUIRE_WEEKLY_ALIGN ? 'checked' : ''} onchange="_onBTSettingChange('require_weekly_align', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-require-strong-signal">Only Strong Signals (≥60)
+          <span class="bt-setting-hint">Requires STRONG BUY/SELL — fewer but higher-confidence entries</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-require-strong-signal" ${BT.REQUIRE_STRONG_SIGNAL ? 'checked' : ''} onchange="_onBTSettingChange('require_strong_signal', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-rsi-filter">RSI Quality Gate
+          <span class="bt-setting-hint">Filter overbought longs / oversold shorts at entry</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <select id="bt-rsi-filter" class="bt-select" onchange="_onBTSettingChange('rsi_filter', this.value)">
+            <option value="OFF"    ${BT.RSI_FILTER === 'OFF'    ? 'selected' : ''}>Off</option>
+            <option value="NORMAL" ${BT.RSI_FILTER === 'NORMAL' ? 'selected' : ''}>Normal (RSI &lt;68 / &gt;32)</option>
+            <option value="STRICT" ${BT.RSI_FILTER === 'STRICT' ? 'selected' : ''}>Strict (RSI &lt;60 / &gt;40)</option>
+          </select>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-macd-confirm">MACD Confirmation
+          <span class="bt-setting-hint">MACD histogram must align with trade direction at entry</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-macd-confirm" ${BT.MACD_CONFIRM ? 'checked' : ''} onchange="_onBTSettingChange('macd_confirm', this.checked)">
+        </div>
+      </div>
     </div>
     <div class="bt-intro">
-      Day-trader walk-forward on ~2 yrs of daily candles. Uses 4H/2H as primary signal timeframes with 1D/1W trend filters and RSI quality gates.
+      Day-trader walk-forward on ~2 yrs of daily candles. Uses 4H/2H as primary signal timeframes with 1D/1W trend filters and configurable entry quality gates.
     </div>
     <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">Run Backtest</button>
-    <div id="bt-result"></div>`;
+    <div id="bt-result"></div>
+    <div class="bt-opt-section">
+      <button class="bt-opt-launch-btn" onclick="_launchOptimizer()">Optimize Settings</button>
+      <span class="bt-opt-hint">Sweeps 768 setting combinations across 6 major pairs to find your best win rate &amp; drawdown profile</span>
+    </div>
+    <div id="bt-optimizer-result"></div>`;
   panel.appendChild(section);
 
   // Show/hide TSL settings based on checkbox
@@ -569,9 +921,13 @@ function appendBacktestSection(panel, f, t) {
   });
 }
 
-window.runBacktest           = runBacktest;
-window.runAutoBacktest       = runAutoBacktest;
-window._launchBacktest       = _launchBacktest;
-window._launchAutoBacktest   = _launchAutoBacktest;
-window.appendBacktestSection = appendBacktestSection;
+window.runBacktest             = runBacktest;
+window.runAutoBacktest         = runAutoBacktest;
+window.runOptimizer            = runOptimizer;
+window._launchBacktest         = _launchBacktest;
+window._launchAutoBacktest     = _launchAutoBacktest;
+window._launchOptimizer        = _launchOptimizer;
+window._applyOptimizerSettings = _applyOptimizerSettings;
+window._reRenderOptimizer      = _reRenderOptimizer;
+window.appendBacktestSection   = appendBacktestSection;
 window._onBTSettingChange    = _onBTSettingChange;
