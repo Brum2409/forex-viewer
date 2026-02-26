@@ -329,17 +329,27 @@ function _renderAnalysisPanel(panel, result, f, t) {
   const recCls = rec.includes('BUY') ? 'rec-buy' : rec.includes('SELL') ? 'rec-sell' : 'rec-neutral';
   const scoreBar = _buildScoreBar(score);
 
-  const biasRows = ['weekly', 'daily', 'h4'].map(tf => {
-    const b = biases[tf];
+  // Show all 6 timeframes: 1W/1D as macro filters, 4H/2H as primary, 1H/30m as entry timing
+  const tfOrder = [
+    { key: 'weekly', label: '1W', role: 'filter' },
+    { key: 'daily',  label: '1D', role: 'filter' },
+    { key: 'h4',     label: '4H', role: 'primary' },
+    { key: 'h2',     label: '2H', role: 'primary' },
+    { key: 'h1',     label: '1H', role: 'timing' },
+    { key: 'm30',    label: '30m', role: 'timing' },
+  ];
+  const biasRows = tfOrder.map(({ key, label, role }) => {
+    const b = biases[key];
     if (!b) return '';
     const cls  = b.bias === 'BULLISH' ? 'bias-bull' : b.bias === 'BEARISH' ? 'bias-bear' : 'bias-neut';
     const icon = b.bias === 'BULLISH' ? '▲' : b.bias === 'BEARISH' ? '▼' : '–';
     const crossBadge = b.emaCross === 'GOLDEN' ? '<span class="cross-badge cross-golden">GX</span>'
                      : b.emaCross === 'DEATH'  ? '<span class="cross-badge cross-death">DX</span>'
                      : '';
+    const roleCls = role === 'primary' ? ' bias-row-primary' : role === 'timing' ? ' bias-row-timing' : '';
     return `
-      <div class="bias-row">
-        <span class="bias-tf">${tf.toUpperCase()}</span>
+      <div class="bias-row${roleCls}">
+        <span class="bias-tf">${label}</span>
         <span class="bias-structure">${b.structure || '—'}</span>
         <span class="bias-ema">EMA ${b.emaSignal || '—'}</span>
         ${crossBadge}
@@ -402,8 +412,7 @@ function _renderAnalysisPanel(panel, result, f, t) {
 }
 
 function _buildIndicatorSection(indicators, pipSize) {
-  const ind = indicators && indicators.daily;
-  if (!ind) return '';
+  if (!indicators) return '';
 
   function indCls(state, bullStates, bearStates) {
     if (bullStates.includes(state)) return 'ind-bull';
@@ -411,64 +420,50 @@ function _buildIndicatorSection(indicators, pipSize) {
     return 'ind-neut';
   }
 
-  // RSI cell
-  const rsiVal = ind.rsi != null ? ind.rsi.toFixed(1) : '—';
-  const rsiCls = indCls(ind.rsiState, ['OVERSOLD', 'LOW'], ['OVERBOUGHT', 'HIGH']);
-  const rsiLbl = ind.rsiState === 'OVERBOUGHT' ? 'OVERBOUGHT'
-               : ind.rsiState === 'OVERSOLD'   ? 'OVERSOLD'
-               : ind.rsiState === 'HIGH'        ? 'HIGH ZONE'
-               : ind.rsiState === 'LOW'         ? 'LOW ZONE'
-               : ind.rsiState === 'UNKNOWN'     ? '—'
-               : 'NEUTRAL';
-  const rsiDivBadge = ind.rsiDivergence !== 'NONE'
-    ? `<span class="div-badge ${ind.rsiDivergence === 'BULLISH' ? 'div-bull' : 'div-bear'}">${ind.rsiDivergence} DIV</span>`
-    : '';
+  function _indRow(ind, tfLabel) {
+    if (!ind) return '';
 
-  // MACD cell
-  const macdSign = ind.macd != null ? (ind.macd >= 0 ? '+' : '') : '';
-  const macdDisp = ind.macd != null ? macdSign + ind.macd.toExponential(2) : '—';
-  const macdCls  = indCls(ind.macdState,
-    ['BULLISH CROSS', 'BULLISH'], ['BEARISH CROSS', 'BEARISH']);
-  const macdLbl  = ind.macdState === 'BULLISH CROSS' ? 'BULL CROSS'
-                 : ind.macdState === 'BEARISH CROSS' ? 'BEAR CROSS'
-                 : ind.macdState === 'BULLISH'        ? 'BULLISH'
-                 : ind.macdState === 'BEARISH'        ? 'BEARISH'
+    const rsiVal = ind.rsi != null ? ind.rsi.toFixed(1) : '—';
+    const rsiCls = indCls(ind.rsiState, ['OVERSOLD', 'LOW'], ['OVERBOUGHT', 'HIGH']);
+    const rsiLbl = ind.rsiState === 'OVERBOUGHT' ? 'OVERBOUGHT'
+                 : ind.rsiState === 'OVERSOLD'   ? 'OVERSOLD'
+                 : ind.rsiState === 'HIGH'        ? 'HIGH ZONE'
+                 : ind.rsiState === 'LOW'         ? 'LOW ZONE'
                  : 'NEUTRAL';
+    const rsiDivBadge = ind.rsiDivergence && ind.rsiDivergence !== 'NONE'
+      ? `<span class="div-badge ${ind.rsiDivergence === 'BULLISH' ? 'div-bull' : 'div-bear'}">${ind.rsiDivergence} DIV</span>`
+      : '';
 
-  // ATR cell
-  const atrDisp = ind.atrPips != null ? `${ind.atrPips} pips` : '—';
-  const atrLbl  = ind.atrPips == null  ? '—'
-                : ind.atrPips > 80    ? 'HIGH VOL'
-                : ind.atrPips > 40    ? 'MODERATE'
-                : 'LOW VOL';
+    const macdSign = ind.macd != null ? (ind.macd >= 0 ? '+' : '') : '';
+    const macdDisp = ind.macd != null ? macdSign + ind.macd.toExponential(2) : '—';
+    const macdCls  = indCls(ind.macdState, ['BULLISH CROSS', 'BULLISH'], ['BEARISH CROSS', 'BEARISH']);
+    const macdLbl  = ind.macdState === 'BULLISH CROSS' ? 'BULL CROSS'
+                   : ind.macdState === 'BEARISH CROSS' ? 'BEAR CROSS'
+                   : ind.macdState === 'BULLISH'        ? 'BULLISH'
+                   : ind.macdState === 'BEARISH'        ? 'BEARISH'
+                   : 'NEUTRAL';
 
-  // EMA cross cell
-  const crossVal = ind.ema50 != null && ind.ema200 != null
-    ? `50 ${ind.ema50 > ind.ema200 ? '>' : '<'} 200`
-    : '—';
-  const crossCls = ind.emaCross === 'GOLDEN' ? 'ind-bull'
-                 : ind.emaCross === 'DEATH'  ? 'ind-bear'
-                 : 'ind-neut';
-  const crossLbl = ind.emaCross === 'GOLDEN' ? 'GOLDEN X'
-                 : ind.emaCross === 'DEATH'  ? 'DEATH X'
-                 : '—';
+    const crossVal = ind.ema50 != null && ind.ema200 != null
+      ? `50 ${ind.ema50 > ind.ema200 ? '>' : '<'} 200` : '—';
+    const crossCls = ind.emaCross === 'GOLDEN' ? 'ind-bull' : ind.emaCross === 'DEATH' ? 'ind-bear' : 'ind-neut';
+    const crossLbl = ind.emaCross === 'GOLDEN' ? 'GOLDEN X' : ind.emaCross === 'DEATH' ? 'DEATH X' : '—';
 
-  // Fibonacci cell
-  let fibVal = '—', fibCls = 'ind-neut', fibLbl = '—';
-  if (ind.fib) {
-    const nl = ind.fib.nearestLevel;
-    fibVal = nl ? `${nl.label}%` : '—';
-    if (ind.fib.signal) {
-      fibCls = ind.fib.signal.direction === 'BULLISH' ? 'ind-bull' : 'ind-bear';
-      fibLbl = `${ind.fib.signal.level}% ${ind.fib.signal.type}`;
-    } else {
-      fibLbl = ind.fib.trend === 'UP' ? 'UPTREND' : 'DOWNTREND';
+    let fibVal = '—', fibCls = 'ind-neut', fibLbl = '—';
+    if (ind.fib) {
+      const nl = ind.fib.nearestLevel;
+      fibVal = nl ? `${nl.label}%` : '—';
+      if (ind.fib.signal) {
+        fibCls = ind.fib.signal.direction === 'BULLISH' ? 'ind-bull' : 'ind-bear';
+        fibLbl = `${ind.fib.signal.level}% ${ind.fib.signal.type}`;
+      } else {
+        fibLbl = ind.fib.trend === 'UP' ? 'UPTREND' : 'DOWNTREND';
+      }
     }
-  }
 
-  return `
-    <div class="analysis-section">
-      <div class="analysis-section-title">Oscillators &amp; Momentum (Daily)</div>
+    const atrDisp = ind.atrPips != null ? `${ind.atrPips} pips` : '—';
+    const atrLbl  = ind.atrPips == null ? '—' : ind.atrPips > 80 ? 'HIGH VOL' : ind.atrPips > 40 ? 'MODERATE' : 'LOW VOL';
+
+    return `<div class="ind-tf-label">${tfLabel}</div>
       <div class="ind-grid">
         <div class="ind-cell">
           <span class="ind-name">RSI (14)</span>
@@ -496,7 +491,44 @@ function _buildIndicatorSection(indicators, pipSize) {
           <span class="ind-val ${fibCls}">${fibVal}</span>
           <span class="ind-lbl ${fibCls}">${fibLbl}</span>
         </div>
-      </div>
+      </div>`;
+  }
+
+  // Build a compact row for 1H and 30m (RSI + MACD only)
+  function _indRowCompact(ind, tfLabel) {
+    if (!ind) return '';
+    const rsiVal = ind.rsi != null ? ind.rsi.toFixed(1) : '—';
+    const rsiCls = indCls(ind.rsiState, ['OVERSOLD', 'LOW'], ['OVERBOUGHT', 'HIGH']);
+    const macdCls = indCls(ind.macdState, ['BULLISH CROSS', 'BULLISH'], ['BEARISH CROSS', 'BEARISH']);
+    const macdLbl = ind.macdState === 'BULLISH CROSS' ? 'BULL X'
+                  : ind.macdState === 'BEARISH CROSS' ? 'BEAR X'
+                  : ind.macdState === 'BULLISH'        ? 'BULL'
+                  : ind.macdState === 'BEARISH'        ? 'BEAR'
+                  : 'NEUTRAL';
+    return `<div class="ind-tf-label">${tfLabel}</div>
+      <div class="ind-grid">
+        <div class="ind-cell">
+          <span class="ind-name">RSI (14)</span>
+          <span class="ind-val ${rsiCls}">${rsiVal}</span>
+          <span class="ind-lbl ${rsiCls}">${ind.rsiState || 'NEUTRAL'}</span>
+        </div>
+        <div class="ind-cell">
+          <span class="ind-name">MACD</span>
+          <span class="ind-val ${macdCls}">${ind.macd != null ? ind.macd.toExponential(2) : '—'}</span>
+          <span class="ind-lbl ${macdCls}">${macdLbl}</span>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="analysis-section">
+      <div class="analysis-section-title">Oscillators &amp; Momentum</div>
+      <div class="ind-section-note">Primary: 4H &amp; 2H · Context: 1D · Entry: 1H &amp; 30m</div>
+      ${_indRow(indicators.h4,    '4H — Primary')}
+      ${_indRow(indicators.h2,    '2H — Confirmation')}
+      ${_indRow(indicators.daily, '1D — Context')}
+      ${_indRowCompact(indicators.h1,  '1H — Entry Timing')}
+      ${_indRowCompact(indicators.m30, '30m — Trigger')}
     </div>`;
 }
 

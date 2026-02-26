@@ -479,6 +479,18 @@ input  { font-family: inherit; }
   padding: 7px 10px;
   font-size: 11px;
 }
+/* Primary trading TF rows (4H/2H) get a highlighted border */
+.bias-row-primary {
+  border-color: rgba(88,166,255,0.35);
+  background: rgba(88,166,255,0.04);
+}
+.bias-row-primary .bias-tf {
+  color: #58a6ff;
+}
+/* Entry timing rows (1H/30m) are slightly muted */
+.bias-row-timing {
+  opacity: 0.80;
+}
 .bias-tf {
   font-size: 10px; font-weight: 700;
   color: var(--txt3); width: 38px; flex-shrink: 0;
@@ -596,6 +608,19 @@ input  { font-family: inherit; }
 .factor-pos { color: var(--green); }
 .factor-neg { color: var(--red); }
 .factor-neu { color: var(--txt3); }
+
+/* Indicator TF section label and section note */
+.ind-tf-label {
+  font-size: 10px; font-weight: 700; color: var(--txt3);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin: 10px 0 4px;
+  padding: 2px 6px;
+  border-left: 2px solid var(--border);
+}
+.ind-section-note {
+  font-size: 10px; color: var(--txt3);
+  margin-bottom: 6px;
+}
 
 /* Indicator grid (RSI, MACD, ATR, EMA cross, Fibonacci) */
 .ind-grid {
