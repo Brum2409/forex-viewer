@@ -9,7 +9,7 @@ const BT_DEFAULTS = {
   WARMUP:         200,   // bars for EMA200 + indicator warm-up
   ATR_SL:         2.0,   // stop-loss = ATR × this
   RR:             2.0,   // take-profit = SL distance × R:R
-  MIN_SCORE:      55,    // minimum |confidence score| to open a trade (raised for quality)
+  MIN_SCORE:      50,    // minimum |confidence score| to open a trade
   USE_TREND_FILTER: true, // apply EMA200 + weekly trend filter
   USE_TRAILING_STOP: false, // use a trailing stop-loss
   TSL_FACTOR:       1.5,   // trailing stop ATR factor
@@ -65,7 +65,10 @@ function _btSignal(candles, pipSize) {
   const currentPrice = candles[candles.length - 1].rate;
 
   const conf = calcConfidenceScore(
-    { weekly: wBias, daily: bias, h4: _BT_NEUTRAL_BIAS, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
+    // h4 uses daily bias as proxy: daily and 4H trends are strongly correlated
+    // at end-of-day and we have no intraday data in this daily backtest.
+    // h2/h1/m30 stay neutral to avoid triggering artificial confluence bonuses.
+    { weekly: wBias, daily: bias, h4: bias, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
     { weekly: _BT_EMPTY_ZONES, daily: zones, h4: _BT_EMPTY_ZONES },
     { weekly: _BT_NO_HS, daily: hs, h4: _BT_NO_HS },
     { daily: cp, h4: [], h2: [] },
