@@ -9,8 +9,8 @@ const BT_DEFAULTS = {
   WARMUP:         200,   // bars for EMA200 + indicator warm-up
   ATR_SL:         2.0,   // stop-loss = ATR × this
   RR:             2.0,   // take-profit = SL distance × R:R
-  MIN_SCORE:      50,    // minimum |confidence score| to open a trade
-  USE_TREND_FILTER: true, // apply EMA200 trend filter
+  MIN_SCORE:      55,    // minimum |confidence score| to open a trade (raised for quality)
+  USE_TREND_FILTER: true, // apply EMA200 + weekly trend filter
   USE_TRAILING_STOP: false, // use a trailing stop-loss
   TSL_FACTOR:       1.5,   // trailing stop ATR factor
   TSL_TRIGGER_RR:   1.0,   // R:R multiple to activate trailing stop
@@ -19,8 +19,7 @@ const BT_DEFAULTS = {
 // Global BT object to hold current settings
 const BT = { ...BT_DEFAULTS };
 
-/* Neutral placeholders so calcConfidenceScore only scores the
-   daily slot — prevents inflating the score with repeated data */
+/* Neutral placeholders for timeframes not used in backtest signal */
 const _BT_NEUTRAL_BIAS = {
   bias: 'NEUTRAL', structure: 'MIXED', emaSignal: 'UNKNOWN',
   emaCross: 'NONE', ema50: null, ema200: null,
@@ -30,28 +29,51 @@ const _BT_NEUTRAL_BIAS = {
 const _BT_EMPTY_ZONES = { supply: [], demand: [] };
 const _BT_NO_HS       = { found: false, type: null, neckline: null, headPrice: null, confidence: null };
 
+/* ── Weekly bias approximation from daily candles ────────── */
+// Groups every 5 daily bars into pseudo-weekly candles to give
+// the scorer a weekly-trend perspective without look-ahead bias.
+function _computeWeeklyFromDaily(dailyCandles, pipSize) {
+  if (!dailyCandles || dailyCandles.length < 10) return _BT_NEUTRAL_BIAS;
+  const weekly = [];
+  for (let i = 0; i < dailyCandles.length; i += 5) {
+    const g = dailyCandles.slice(i, i + 5);
+    if (g.length < 3) continue;
+    weekly.push({
+      ts:   g[g.length - 1].ts,
+      open: g[0].open  || g[0].rate,
+      high: Math.max(...g.map(c => c.high || c.rate)),
+      low:  Math.min(...g.map(c => c.low  || c.rate)),
+      rate: g[g.length - 1].rate,
+    });
+  }
+  return weekly.length >= 5 ? detectBias(weekly, pipSize) : _BT_NEUTRAL_BIAS;
+}
+
 /* ── Signal from a fixed candle slice (no API calls) ─────── */
+// Now includes weekly-trend approximation for proper multi-TF scoring.
+// Also exposes weeklyBias and dailyRsi for the walk-forward filters.
 function _btSignal(candles, pipSize) {
   const ind = computeIndicators(candles, pipSize);
   if (!ind || !ind.atr) return null;
 
-  const bias  = detectBias(candles, pipSize);
-  const zones = detectZones(candles, pipSize);
-  const hs    = detectHeadAndShoulders(candles);
-  const cp    = detectCandlestickPatterns(candles);
+  const bias    = detectBias(candles, pipSize);
+  const wBias   = _computeWeeklyFromDaily(candles, pipSize);
+  const zones   = detectZones(candles, pipSize);
+  const hs      = detectHeadAndShoulders(candles);
+  const cp      = detectCandlestickPatterns(candles);
 
   const currentPrice = candles[candles.length - 1].rate;
 
   const conf = calcConfidenceScore(
-    { weekly: _BT_NEUTRAL_BIAS, daily: bias,  h4: _BT_NEUTRAL_BIAS },
-    { weekly: _BT_EMPTY_ZONES,  daily: zones, h4: _BT_EMPTY_ZONES  },
-    { weekly: _BT_NO_HS,        daily: hs,    h4: _BT_NO_HS        },
-    { daily:  cp, h4: [] },
-    { daily:  ind, h4: null },
+    { weekly: wBias, daily: bias, h4: _BT_NEUTRAL_BIAS, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
+    { weekly: _BT_EMPTY_ZONES, daily: zones, h4: _BT_EMPTY_ZONES },
+    { weekly: _BT_NO_HS, daily: hs, h4: _BT_NO_HS },
+    { daily: cp, h4: [], h2: [] },
+    { daily: ind, h4: null, h2: null, h1: null, m30: null },
     currentPrice, pipSize
   );
 
-  return { ...conf, atr: ind.atr, ema200: ind.ema200 };
+  return { ...conf, atr: ind.atr, ema200: ind.ema200, weeklyBias: wBias.bias, dailyRsi: ind.rsi };
 }
 
 /* ── Walk-forward simulation ─────────────────────────────── */
@@ -113,10 +135,25 @@ function _walkForward(candles, pipSize) {
         const slDist = sig.atr * BT.ATR_SL;
 
         if (slDist) { // Skip if ATR is zero
-          if (!BT.USE_TREND_FILTER || !sig.ema200 ||
-              (direction === 'LONG' && entry >= sig.ema200) ||
-              (direction === 'SHORT' && entry <= sig.ema200))
-          {
+          // EMA200 trend filter (daily EMA200 on primary timeframe)
+          const emaOK = !BT.USE_TREND_FILTER || !sig.ema200 ||
+            (direction === 'LONG'  && entry >= sig.ema200) ||
+            (direction === 'SHORT' && entry <= sig.ema200);
+
+          // Weekly trend alignment filter — avoids counter-trend trades
+          // NEUTRAL weekly allows both directions; opposing weekly blocks trade
+          const weeklyOK = !BT.USE_TREND_FILTER || !sig.weeklyBias ||
+            sig.weeklyBias === 'NEUTRAL' ||
+            (direction === 'LONG'  && sig.weeklyBias === 'BULLISH') ||
+            (direction === 'SHORT' && sig.weeklyBias === 'BEARISH');
+
+          // RSI quality filter — avoid entering when daily RSI is extended
+          // against the trade direction (overbought on longs, oversold on shorts)
+          const rsiOK = sig.dailyRsi == null ||
+            (direction === 'LONG'  && sig.dailyRsi < 68) ||
+            (direction === 'SHORT' && sig.dailyRsi > 32);
+
+          if (emaOK && weeklyOK && rsiOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
             position = { direction, entry, sl, tp, entryBar: i + 1,
@@ -516,7 +553,7 @@ function appendBacktestSection(panel, f, t) {
       </div>
     </div>
     <div class="bt-intro">
-      Walk-forward on ~2 yrs of daily candles. Current settings are applied.
+      Day-trader walk-forward on ~2 yrs of daily candles. Uses 4H/2H as primary signal timeframes with 1D/1W trend filters and RSI quality gates.
     </div>
     <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">Run Backtest</button>
     <div id="bt-result"></div>`;

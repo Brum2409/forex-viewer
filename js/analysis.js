@@ -633,22 +633,20 @@ function detectCandlestickPatterns(candles) {
 }
 
 /* ── Confidence Score ─────────────────────────────────────── */
-// Weighted multi-factor score from -100 (strong bear) to +100 (strong bull).
-// Factors and weights:
-//   Bias (weekly/daily/4H): ±25/20/15
-//   Triple TF confluence bonus: ±10
-//   EMA 50/200 cross (daily): ±8
-//   RSI overbought/oversold (daily): ±10 with trend (±5 countertrend), mid-zone: ±4
-//   RSI divergence (daily): ±8
-//   MACD crossover (daily): ±8  sustained momentum: ±4
-//   MACD above/below zero (daily): ±3
-//   Fibonacci key level (daily): ±6 (61.8% → ±8)
-//   4H RSI extreme: ±5
-//   4H MACD crossover: ±5
-//   Zone proximity (per TF, trend-aware): near ±10/±5 (trend-aligned/counter)
+// Day-trader multi-timeframe score from -100 (strong bear) to +100 (strong bull).
+// Timeframe hierarchy:
+//   MACRO FILTERS  (1W/1D):  Weekly ±15, Daily ±12 — trend direction context
+//   PRIMARY SIGNAL (4H/2H):  4H ±20, 2H ±15        — main trading timeframes
+//   ENTRY TIMING   (1H):     1H ±8                  — entry confirmation
+//   CONFLUENCE     bonuses:  Quad ±15, Triple ±10, Dual ±5
+//   4H INDICATORS (primary): EMA cross ±8, RSI ±8, RSI div ±6, MACD ±8, Fib ±6–8
+//   2H INDICATORS (confirm): RSI ±5, MACD cross ±6, momentum ±3
+//   1H INDICATORS (timing):  RSI ±4, MACD cross ±4
+//   30m TRIGGER:             MACD cross ±3
+//   DAILY INDICATORS (ctx):  EMA cross ±5, RSI ±6, RSI div ±5, MACD ±5/±2, Fib ±4–5
+//   Zone proximity (trend-aware): ±10/±5
 //   H&S patterns: ±10
-//   Candlestick patterns 4H: ±5 each, max ±10
-//   Candlestick patterns Daily: ±4 each, max ±8
+//   Candlestick: 4H ±5 each max ±10, 2H ±4 each max ±8, Daily ±3 each max ±6
 function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicators, currentPrice, pipSize) {
   let score = 0;
   const factors = [];
@@ -659,86 +657,154 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
     factors.push({ label, value, points: pts });
   }
 
-  // ── Bias scoring ────────────────────────────────────────
   const biasDir = { BULLISH: 1, BEARISH: -1, NEUTRAL: 0 };
-  add(biasDir[biases.weekly && biases.weekly.bias] * 25, 'WEEKLY Bias', biases.weekly && biases.weekly.bias);
-  add(biasDir[biases.daily  && biases.daily.bias]  * 20, 'DAILY Bias',  biases.daily  && biases.daily.bias);
-  add(biasDir[biases.h4     && biases.h4.bias]     * 15, '4H Bias',     biases.h4     && biases.h4.bias);
 
-  // Triple confluence bonus
-  const allBiases = [biases.weekly && biases.weekly.bias, biases.daily && biases.daily.bias, biases.h4 && biases.h4.bias];
-  if (allBiases.every(b => b === 'BULLISH')) add(10,  'Triple Bullish Confluence', 'All TFs Aligned');
-  if (allBiases.every(b => b === 'BEARISH')) add(-10, 'Triple Bearish Confluence', 'All TFs Aligned');
+  // ── Macro-trend filters (1W / 1D) — lighter weight, directional context ──
+  add(biasDir[biases.weekly && biases.weekly.bias] * 15, 'WEEKLY Bias', biases.weekly && biases.weekly.bias);
+  add(biasDir[biases.daily  && biases.daily.bias]  * 12, 'DAILY Bias',  biases.daily  && biases.daily.bias);
 
-  // Daily bias used for trend-aware sub-scoring below
-  const dailyBias     = biases.daily && biases.daily.bias;    // 'BULLISH'|'BEARISH'|'NEUTRAL'
-  const dailyEmaSignal = biases.daily && biases.daily.emaSignal; // 'ABOVE'|'BELOW'|'NEAR'|'UNKNOWN'
+  // ── Primary day-trading timeframes (4H / 2H) — highest weight ──────────
+  add(biasDir[biases.h4 && biases.h4.bias] * 20, '4H Bias', biases.h4 && biases.h4.bias);
+  add(biasDir[biases.h2 && biases.h2.bias] * 15, '2H Bias', biases.h2 && biases.h2.bias);
 
-  // ── Daily indicators ────────────────────────────────────
+  // ── Entry timing (1H) ───────────────────────────────────────────────────
+  add(biasDir[biases.h1 && biases.h1.bias] * 8, '1H Bias', biases.h1 && biases.h1.bias);
+
+  // ── Multi-TF confluence bonuses ─────────────────────────────────────────
+  const h4b = biases.h4     && biases.h4.bias;
+  const h2b = biases.h2     && biases.h2.bias;
+  const h1b = biases.h1     && biases.h1.bias;
+  const db  = biases.daily  && biases.daily.bias;
+  const wb  = biases.weekly && biases.weekly.bias;
+
+  // Quad confluence: all four major TFs aligned (1W+1D+4H+2H)
+  if ([wb, db, h4b, h2b].every(b => b === 'BULLISH'))      add(15,  'Quad Bullish Confluence', '1W+1D+4H+2H Aligned');
+  else if ([wb, db, h4b, h2b].every(b => b === 'BEARISH')) add(-15, 'Quad Bearish Confluence', '1W+1D+4H+2H Aligned');
+  // Triple: 1D+4H+2H aligned
+  else if ([db, h4b, h2b].every(b => b === 'BULLISH'))      add(10,  'Triple Bullish Confluence', '1D+4H+2H Aligned');
+  else if ([db, h4b, h2b].every(b => b === 'BEARISH'))      add(-10, 'Triple Bearish Confluence', '1D+4H+2H Aligned');
+  // Dual: primary TFs (4H+2H) aligned
+  else if (h4b === 'BULLISH' && h2b === 'BULLISH')          add(5,   '4H+2H Bullish Confluence', 'Primary TFs Aligned');
+  else if (h4b === 'BEARISH' && h2b === 'BEARISH')          add(-5,  '4H+2H Bearish Confluence', 'Primary TFs Aligned');
+
+  // ── 4H Indicators — primary trading timeframe ───────────────────────────
+  const h4Ind = indicators && indicators.h4;
+  if (h4Ind) {
+    // EMA 50/200 cross — now on 4H as primary
+    if (h4Ind.emaCross === 'GOLDEN') add(8,  '4H EMA Cross', 'Golden (50 > 200)');
+    if (h4Ind.emaCross === 'DEATH')  add(-8, '4H EMA Cross', 'Death (50 < 200)');
+
+    // RSI — trend-aware on primary TF
+    const h4Rsi = h4Ind.rsi != null ? h4Ind.rsi.toFixed(1) : '—';
+    if (h4Ind.rsiState === 'OVERSOLD') {
+      add(h4b === 'BULLISH' ? 8 : 4, '4H RSI', `${h4Rsi} — Oversold`);
+    } else if (h4Ind.rsiState === 'OVERBOUGHT') {
+      add(h4b === 'BEARISH' ? -8 : -4, '4H RSI', `${h4Rsi} — Overbought`);
+    } else if (h4Ind.rsiState === 'LOW') {
+      add(3, '4H RSI', `${h4Rsi} — Low Zone`);
+    } else if (h4Ind.rsiState === 'HIGH') {
+      add(-3, '4H RSI', `${h4Rsi} — High Zone`);
+    }
+
+    // RSI divergence on 4H — strong reversal signal for day trader
+    if (h4Ind.rsiDivergence === 'BULLISH') add(6,  '4H RSI Divergence', 'Bullish Divergence');
+    if (h4Ind.rsiDivergence === 'BEARISH') add(-6, '4H RSI Divergence', 'Bearish Divergence');
+
+    // MACD on 4H — primary momentum signal
+    if      (h4Ind.macdState === 'BULLISH CROSS') add(8,  '4H MACD', 'Bullish Crossover');
+    else if (h4Ind.macdState === 'BEARISH CROSS') add(-8, '4H MACD', 'Bearish Crossover');
+    else if (h4Ind.macdState === 'BULLISH')        add(4,  '4H MACD', 'Bullish Momentum');
+    else if (h4Ind.macdState === 'BEARISH')        add(-4, '4H MACD', 'Bearish Momentum');
+
+    // MACD above/below zero
+    if (h4Ind.macdAboveZero === true)  add(3,  '4H MACD Zone', 'Above Zero');
+    if (h4Ind.macdAboveZero === false) add(-3, '4H MACD Zone', 'Below Zero');
+
+    // Fibonacci retracement on 4H — key for day trader entries
+    if (h4Ind.fib && h4Ind.fib.signal) {
+      const fibPts = h4Ind.fib.signal.level === '61.8' ? 8 : 6;
+      if (h4Ind.fib.signal.direction === 'BULLISH') add(fibPts,  '4H Fibonacci', `${h4Ind.fib.signal.level}% Support`);
+      if (h4Ind.fib.signal.direction === 'BEARISH') add(-fibPts, '4H Fibonacci', `${h4Ind.fib.signal.level}% Resistance`);
+    }
+  }
+
+  // ── 2H Indicators — secondary confirmation ──────────────────────────────
+  const h2Ind = indicators && indicators.h2;
+  if (h2Ind) {
+    const h2Rsi = h2Ind.rsi != null ? h2Ind.rsi.toFixed(1) : '—';
+    if (h2Ind.rsiState === 'OVERSOLD')   add(5,  '2H RSI', `${h2Rsi} — Oversold`);
+    if (h2Ind.rsiState === 'OVERBOUGHT') add(-5, '2H RSI', `${h2Rsi} — Overbought`);
+    if      (h2Ind.macdState === 'BULLISH CROSS') add(6,  '2H MACD', 'Bullish Crossover');
+    else if (h2Ind.macdState === 'BEARISH CROSS') add(-6, '2H MACD', 'Bearish Crossover');
+    else if (h2Ind.macdState === 'BULLISH')        add(3,  '2H MACD', 'Bullish Momentum');
+    else if (h2Ind.macdState === 'BEARISH')        add(-3, '2H MACD', 'Bearish Momentum');
+  }
+
+  // ── 1H Indicators — entry timing ────────────────────────────────────────
+  const h1Ind = indicators && indicators.h1;
+  if (h1Ind) {
+    const h1Rsi = h1Ind.rsi != null ? h1Ind.rsi.toFixed(1) : '—';
+    if (h1Ind.rsiState === 'OVERSOLD')   add(4,  '1H RSI', `${h1Rsi} — Oversold`);
+    if (h1Ind.rsiState === 'OVERBOUGHT') add(-4, '1H RSI', `${h1Rsi} — Overbought`);
+    if (h1Ind.macdState === 'BULLISH CROSS') add(4,  '1H MACD', 'Bullish Crossover');
+    if (h1Ind.macdState === 'BEARISH CROSS') add(-4, '1H MACD', 'Bearish Crossover');
+  }
+
+  // ── 30m Trigger — final entry confirmation ───────────────────────────────
+  const m30Ind = indicators && indicators.m30;
+  if (m30Ind) {
+    if (m30Ind.macdState === 'BULLISH CROSS') add(3,  '30m MACD Trigger', 'Bullish Entry Signal');
+    if (m30Ind.macdState === 'BEARISH CROSS') add(-3, '30m MACD Trigger', 'Bearish Entry Signal');
+  }
+
+  // ── Daily Indicators — higher-TF context (reduced weight) ───────────────
+  const dailyBias      = biases.daily && biases.daily.bias;
+  const dailyEmaSignal = biases.daily && biases.daily.emaSignal;
   const dInd = indicators && indicators.daily;
   if (dInd) {
-    // EMA 50/200 cross
-    if (dInd.emaCross === 'GOLDEN') add(8,  'Daily EMA Cross', 'Golden (50 > 200)');
-    if (dInd.emaCross === 'DEATH')  add(-8, 'Daily EMA Cross', 'Death (50 < 200)');
+    // EMA cross: macro trend context
+    if (dInd.emaCross === 'GOLDEN') add(5,  'Daily EMA Cross', 'Golden (50 > 200)');
+    if (dInd.emaCross === 'DEATH')  add(-5, 'Daily EMA Cross', 'Death (50 < 200)');
 
-    // RSI — trend-aware: extreme readings aligned with trend score higher;
-    // countertrend extremes score half (they indicate potential reversal only,
-    // not continuation, and carry higher risk of being faded further).
+    // RSI — trend-aware
     const rsiDisp = dInd.rsi != null ? dInd.rsi.toFixed(1) : '—';
     if (dInd.rsiState === 'OVERSOLD') {
-      const trendAligned = dailyBias === 'BULLISH' || dailyEmaSignal === 'ABOVE';
-      add(trendAligned ? 10 : 5, 'Daily RSI', `${rsiDisp} — Oversold`);
+      const aligned = dailyBias === 'BULLISH' || dailyEmaSignal === 'ABOVE';
+      add(aligned ? 6 : 3, 'Daily RSI', `${rsiDisp} — Oversold`);
     } else if (dInd.rsiState === 'OVERBOUGHT') {
-      const trendAligned = dailyBias === 'BEARISH' || dailyEmaSignal === 'BELOW';
-      add(trendAligned ? -10 : -5, 'Daily RSI', `${rsiDisp} — Overbought`);
+      const aligned = dailyBias === 'BEARISH' || dailyEmaSignal === 'BELOW';
+      add(aligned ? -6 : -3, 'Daily RSI', `${rsiDisp} — Overbought`);
     } else if (dInd.rsiState === 'LOW') {
-      add(4, 'Daily RSI', `${rsiDisp} — Low Zone`);
+      add(2, 'Daily RSI', `${rsiDisp} — Low Zone`);
     } else if (dInd.rsiState === 'HIGH') {
-      add(-4, 'Daily RSI', `${rsiDisp} — High Zone`);
+      add(-2, 'Daily RSI', `${rsiDisp} — High Zone`);
     }
 
     // RSI divergence
-    if (dInd.rsiDivergence === 'BULLISH') add(8,  'RSI Divergence', 'Bullish Divergence');
-    if (dInd.rsiDivergence === 'BEARISH') add(-8, 'RSI Divergence', 'Bearish Divergence');
+    if (dInd.rsiDivergence === 'BULLISH') add(5,  'Daily RSI Divergence', 'Bullish Divergence');
+    if (dInd.rsiDivergence === 'BEARISH') add(-5, 'Daily RSI Divergence', 'Bearish Divergence');
 
     // MACD
-    if      (dInd.macdState === 'BULLISH CROSS') add(8,  'Daily MACD', 'Bullish Crossover');
-    else if (dInd.macdState === 'BEARISH CROSS') add(-8, 'Daily MACD', 'Bearish Crossover');
-    else if (dInd.macdState === 'BULLISH')        add(4,  'Daily MACD', 'Bullish Momentum');
-    else if (dInd.macdState === 'BEARISH')        add(-4, 'Daily MACD', 'Bearish Momentum');
+    if      (dInd.macdState === 'BULLISH CROSS') add(5,  'Daily MACD', 'Bullish Crossover');
+    else if (dInd.macdState === 'BEARISH CROSS') add(-5, 'Daily MACD', 'Bearish Crossover');
+    else if (dInd.macdState === 'BULLISH')        add(2,  'Daily MACD', 'Bullish Momentum');
+    else if (dInd.macdState === 'BEARISH')        add(-2, 'Daily MACD', 'Bearish Momentum');
 
-    // MACD above/below zero line
-    if (dInd.macdAboveZero === true)  add(3,  'Daily MACD Zone', 'Above Zero');
-    if (dInd.macdAboveZero === false) add(-3, 'Daily MACD Zone', 'Below Zero');
-
-    // Fibonacci
+    // Fibonacci (daily context)
     if (dInd.fib && dInd.fib.signal) {
-      const fibPts = dInd.fib.signal.level === '61.8' ? 8 : 6;
-      if (dInd.fib.signal.direction === 'BULLISH') add(fibPts,  'Fibonacci', `${dInd.fib.signal.level}% Support`);
-      if (dInd.fib.signal.direction === 'BEARISH') add(-fibPts, 'Fibonacci', `${dInd.fib.signal.level}% Resistance`);
+      const fibPts = dInd.fib.signal.level === '61.8' ? 5 : 4;
+      if (dInd.fib.signal.direction === 'BULLISH') add(fibPts,  'Daily Fibonacci', `${dInd.fib.signal.level}% Support`);
+      if (dInd.fib.signal.direction === 'BEARISH') add(-fibPts, 'Daily Fibonacci', `${dInd.fib.signal.level}% Resistance`);
     }
   }
 
-  // ── 4H indicators (lighter weight) ──────────────────────
-  const h4Ind = indicators && indicators.h4;
-  if (h4Ind) {
-    if (h4Ind.rsiState === 'OVERSOLD')   add(5,  '4H RSI', `${h4Ind.rsi != null ? h4Ind.rsi.toFixed(1) : '—'} — Oversold`);
-    if (h4Ind.rsiState === 'OVERBOUGHT') add(-5, '4H RSI', `${h4Ind.rsi != null ? h4Ind.rsi.toFixed(1) : '—'} — Overbought`);
-    if (h4Ind.macdState === 'BULLISH CROSS') add(5,  '4H MACD', 'Bullish Crossover');
-    if (h4Ind.macdState === 'BEARISH CROSS') add(-5, '4H MACD', 'Bearish Crossover');
-  }
-
-  // ── Zone proximity (trend-aware) ─────────────────────────
-  // detectZones guarantees supply zones have bottom > currentPrice and
-  // demand zones have top < currentPrice, so only proximity checks apply.
-  // Zones aligned with the daily trend score higher than countertrend zones.
+  // ── Zone proximity (trend-aware) ─────────────────────────────────────────
   const nearPips = 10;
   for (const tf of ['weekly', 'daily', 'h4']) {
     const z = zones[tf];
     if (!z) continue;
     for (const zone of z.supply) {
       if (zone.bottom - currentPrice <= nearPips * pipSize) {
-        // Supply resistance: strongest when trend is already bearish
         const pts = dailyBias === 'BEARISH' ? -10
                   : dailyBias === 'BULLISH' ? -5
                   : -8;
@@ -747,27 +813,26 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
     }
     for (const zone of z.demand) {
       if (currentPrice - zone.top <= nearPips * pipSize) {
-        // Demand support: strongest when trend is already bullish
         const pts = dailyBias === 'BULLISH' ? 10
                   : dailyBias === 'BEARISH' ? 5
                   : 8;
-        add(pts,  `${tf.toUpperCase()} Near Demand`, `${zone.strength} touches`); break;
+        add(pts, `${tf.toUpperCase()} Near Demand`, `${zone.strength} touches`); break;
       }
     }
   }
 
-  // ── H&S patterns ────────────────────────────────────────
+  // ── H&S patterns ─────────────────────────────────────────────────────────
   for (const [tf, hs] of Object.entries(hsPatterns)) {
     if (!hs || !hs.found) continue;
     if (hs.type === 'HS')  add(-10, `${tf.toUpperCase()} Head & Shoulders`, hs.confidence);
     if (hs.type === 'IHS') add(10,  `${tf.toUpperCase()} Inv. H&S`,         hs.confidence);
   }
 
-  // ── Candlestick patterns ─────────────────────────────────
+  // ── Candlestick patterns ──────────────────────────────────────────────────
   for (const [tf, pats] of Object.entries(candlePatterns)) {
     if (!pats) continue;
-    const perPat = tf === 'h4' ? 5 : 4;
-    const cap    = tf === 'h4' ? 10 : 8;
+    const perPat = tf === 'h4' ? 5 : tf === 'h2' ? 4 : 3;
+    const cap    = tf === 'h4' ? 10 : tf === 'h2' ? 8 : 6;
     let bullAcc = 0, bearAcc = 0;
     for (const p of pats) {
       if (p.type === 'BULLISH' && bullAcc < cap)  bullAcc += perPat;
@@ -789,41 +854,60 @@ function calcConfidenceScore(biases, zones, hsPatterns, candlePatterns, indicato
 }
 
 /* ── Main Entry Point ─────────────────────────────────────── */
+// Day-trader framework: 4H/2H are the primary trading timeframes.
+// 1D/1W provide macro trend context (filters).
+// 1H/30m provide entry timing and final confirmation.
 async function runFullAnalysis(f, t) {
   const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
 
-  const [h4Data, dailyData, weeklyData] = await Promise.all([
+  // Fetch all 6 timeframes in parallel for maximum performance
+  const [m30Data, h1Data, h2Data, h4Data, dailyData, weeklyData] = await Promise.all([
+    fetchYahooFinanceChart(f, t, '30m'),
+    fetchYahooFinanceChart(f, t, '1h'),
+    fetchYahooFinanceChart(f, t, '2h'),
     fetchYahooFinanceChart(f, t, '4h'),
     fetchYahooFinanceChart(f, t, '1D'),
     fetchYahooFinanceChart(f, t, '1W'),
   ]);
 
+  // Market bias across all 6 timeframes
   const biases = {
+    m30:    detectBias(m30Data,    pipSize),
+    h1:     detectBias(h1Data,     pipSize),
+    h2:     detectBias(h2Data,     pipSize),
     h4:     detectBias(h4Data,     pipSize),
     daily:  detectBias(dailyData,  pipSize),
     weekly: detectBias(weeklyData, pipSize),
   };
 
+  // Supply/demand zones from 4H, Daily, Weekly
   const zones = {
     h4:     detectZones(h4Data,     pipSize),
     daily:  detectZones(dailyData,  pipSize),
     weekly: detectZones(weeklyData, pipSize),
   };
 
+  // Head & Shoulders on primary and higher TFs
   const hsPatterns = {
     h4:     detectHeadAndShoulders(h4Data),
     daily:  detectHeadAndShoulders(dailyData),
     weekly: detectHeadAndShoulders(weeklyData),
   };
 
+  // Candlestick patterns on primary TFs
   const candlePatterns = {
+    h2:    detectCandlestickPatterns(h2Data),
     h4:    detectCandlestickPatterns(h4Data),
     daily: detectCandlestickPatterns(dailyData),
   };
 
+  // Full indicator suites across all relevant timeframes
   const indicators = {
-    daily: computeIndicators(dailyData,  pipSize),
-    h4:    computeIndicators(h4Data,     pipSize),
+    m30:   computeIndicators(m30Data,   pipSize),
+    h1:    computeIndicators(h1Data,    pipSize),
+    h2:    computeIndicators(h2Data,    pipSize),
+    h4:    computeIndicators(h4Data,    pipSize),
+    daily: computeIndicators(dailyData, pipSize),
   };
 
   const currentPrice = (h4Data && h4Data.length) ? h4Data[h4Data.length - 1].rate : null;
