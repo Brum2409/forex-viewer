@@ -25,6 +25,9 @@ const BT_DEFAULTS = {
   // ── Intelligent exit controls ────────────────────────────
   BREAKEVEN_TRIGGER_RR:  1.0,  // move SL to entry once profit ≥ this × initial risk
   REVERSAL_EXIT_SCORE:   45,   // exit immediately if opposite-direction score reaches this
+  // ── Short-term performance filters ──────────────────────
+  SCORE_CONSISTENCY:     0,    // require last N bars to signal same direction (0 = off, 2-3 practical)
+  USE_VOLATILITY_FILTER: false,// skip entries when current bar's range < 75% of 20-bar avg (avoids ranging)
 };
 
 // Global BT object to hold current settings
@@ -168,8 +171,9 @@ function _btSignal(candles, pipSize) {
 //     5. SL / TP hits.
 // No hard hold limit: the bot decides when a trade is done.
 function _walkForward(candles, pipSize) {
-  const trades   = [];
-  let   position = null;
+  const trades      = [];
+  let   position    = null;
+  const recentScores = []; // rolling buffer for score-consistency check (last 5 signals)
 
   // Only enter new trades inside the backtest window; signal computation
   // still uses the full candle history for accurate EMA200/ATR.
@@ -178,6 +182,12 @@ function _walkForward(candles, pipSize) {
   for (let i = btWindowStart; i < candles.length - 1; i++) {
     const next = candles[i + 1];
     const sig  = _btSignal(candles.slice(0, i + 1), pipSize);
+
+    // Track signal history for consistency filter
+    if (sig) {
+      recentScores.push(sig.score);
+      if (recentScores.length > 5) recentScores.shift();
+    }
 
     /* ── Manage open position ───────────────────────── */
     if (position) {
@@ -298,7 +308,29 @@ function _walkForward(candles, pipSize) {
             (direction === 'LONG'  && sig.dailyMacdHist > 0) ||
             (direction === 'SHORT' && sig.dailyMacdHist < 0);
 
-          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK) {
+          // Score consistency: require last N signals in the same direction
+          const consistN = Math.floor(BT.SCORE_CONSISTENCY) || 0;
+          const consistencyOK = consistN <= 0 || recentScores.length < consistN ||
+            recentScores.slice(-consistN).every(s => direction === 'LONG' ? s > 0 : s < 0);
+
+          // Volatility expansion: skip if today's candle range < 75% of 20-bar avg
+          // (market compressing / ranging → poor trend-follow environment)
+          let volatilityOK = true;
+          if (BT.USE_VOLATILITY_FILTER) {
+            const v0 = Math.max(0, i - 19);
+            let rSum = 0, rCnt = 0;
+            for (let k = v0; k < i; k++) {
+              rSum += (candles[k].high ?? candles[k].rate) - (candles[k].low ?? candles[k].rate);
+              rCnt++;
+            }
+            if (rCnt >= 5) {
+              const avgR = rSum / rCnt;
+              const curR = (candles[i].high ?? candles[i].rate) - (candles[i].low ?? candles[i].rate);
+              volatilityOK = avgR === 0 || curR >= avgR * 0.75;
+            }
+          }
+
+          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK && consistencyOK && volatilityOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
             position = {
@@ -409,8 +441,9 @@ async function runBacktest(f, t) {
 /* ── Public: auto-test all configured pairs ──────────────── */
 async function runAutoBacktest(progressCb) {
   _updateBTState(); // Sync global BT object with UI settings
-  const pairs   = CFG.PAIRS.slice(0, 12);
-  const results = [];
+  const excluded = _getExcludedPairs();
+  const pairs    = CFG.PAIRS.slice(0, 12).filter(p => !excluded.includes(`${p.f}/${p.t}`));
+  const results  = [];
 
   for (let i = 0; i < pairs.length; i++) {
     const { f, t } = pairs[i];
@@ -597,18 +630,25 @@ function _buildBacktestResult(result, f, t) {
 }
 
 function _buildAutoBacktestResult(result) {
-    if (result.error) return `<div class="analysis-error">${result.error}</div>`;
+  if (result.error) return `<div class="analysis-error">${result.error}</div>`;
 
   const { pairs, avgScore, totalPips, avgWinRate } = result;
-  const scoreCls = avgScore >= 70 ? 'bt-score-great' : avgScore >= 50 ? 'bt-score-ok' : 'bt-score-poor';
+  const scoreCls  = avgScore >= 70 ? 'bt-score-great' : avgScore >= 50 ? 'bt-score-ok' : 'bt-score-poor';
+  const excluded  = _getExcludedPairs();
 
   const rows = pairs.map(p => {
-    const pipNum  = parseFloat(p.totalPips);
-    const pipSign = pipNum >= 0 ? '+' : '';
-    const pipCls  = pipNum >= 0 ? 'bt-pip-pos' : 'bt-pip-neg';
-    const sCls    = p.profitabilityScore >= 70 ? 'bt-score-great' : p.profitabilityScore >= 50 ? 'bt-score-ok' : 'bt-score-poor';
-    return `<div class="bt-auto-row">
-      <span class="bt-auto-pair">${p.pair}</span>
+    const pipNum   = parseFloat(p.totalPips);
+    const pipSign  = pipNum >= 0 ? '+' : '';
+    const pipCls   = pipNum >= 0 ? 'bt-pip-pos' : 'bt-pip-neg';
+    const sCls     = p.profitabilityScore >= 70 ? 'bt-score-great' : p.profitabilityScore >= 50 ? 'bt-score-ok' : 'bt-score-poor';
+    const isExcl   = excluded.includes(p.pair);
+    const btnLabel = isExcl ? '+ Include' : '✕ Exclude';
+    const btnCls   = isExcl ? 'bt-incl-btn' : 'bt-excl-btn';
+    return `<div class="bt-auto-row${isExcl ? ' bt-auto-row--excluded' : ''}">
+      <span class="bt-auto-pair">
+        ${p.pair}
+        <button class="${btnCls}" onclick="_toggleExcludedPair('${p.pair}')">${btnLabel}</button>
+      </span>
       <span class="bt-auto-score ${sCls}">${p.profitabilityScore}</span>
       <span class="bt-auto-wr">${p.winRate}%</span>
       <span class="bt-auto-pips ${pipCls}">${pipSign}${p.totalPips}p</span>
@@ -617,14 +657,36 @@ function _buildAutoBacktestResult(result) {
 
   const totalSign = parseFloat(totalPips) >= 0 ? '+' : '';
 
+  // Excluded pairs footer
+  const exclSection = excluded.length > 0 ? `
+    <div class="bt-excl-section">
+      <span class="bt-excl-label">Excluded from test (${excluded.length}): ${excluded.join(', ')}</span>
+      <button class="bt-excl-clear" onclick="_clearExcludedPairs()">Clear all exclusions</button>
+    </div>` : '';
+
   return `<div class="bt-auto-wrap">
-    <div class="bt-auto-header"><div class="bt-auto-hcell">Pair</div><div class="bt-auto-hcell">Score</div><div class="bt-auto-hcell">Win%</div><div class="bt-auto-hcell">Pips</div></div>
+    <div class="bt-auto-header">
+      <div class="bt-auto-hcell">Pair</div>
+      <div class="bt-auto-hcell">Score</div>
+      <div class="bt-auto-hcell">Win%</div>
+      <div class="bt-auto-hcell">Pips</div>
+    </div>
     ${rows}
     <div class="bt-auto-summary">
       <span>Avg Score: <strong class="bt-score-label ${scoreCls}">${avgScore}</strong></span>
       <span>Avg Win Rate: <strong>${avgWinRate}%</strong></span>
       <span>All Pairs: <strong class="${parseFloat(totalPips) >= 0 ? 'bt-pip-pos' : 'bt-pip-neg'}">${totalSign}${totalPips}p</strong></span>
     </div>
+    ${exclSection}
+  </div>
+  <div class="bt-copy-row bt-auto-copy-row">
+    <button id="bt-auto-copy-btn" class="bt-copy-btn" onclick="_copyAutoBacktestExport()">
+      Copy All Pairs Report
+    </button>
+    <span class="bt-copy-hint">
+      Copies all pair scores, win rates, pips, and settings — paste into Claude
+      for a full strategy assessment and improvement suggestions.
+    </span>
   </div>`;
 }
 
@@ -654,6 +716,8 @@ function _updateBTState() {
     BT.MAX_HOLD_DAYS          = _getBTSavedSetting('max_hold_days',           BT_DEFAULTS.MAX_HOLD_DAYS);
     BT.BREAKEVEN_TRIGGER_RR   = _getBTSavedSetting('breakeven_trigger_rr',    BT_DEFAULTS.BREAKEVEN_TRIGGER_RR);
     BT.REVERSAL_EXIT_SCORE    = _getBTSavedSetting('reversal_exit_score',     BT_DEFAULTS.REVERSAL_EXIT_SCORE);
+    BT.SCORE_CONSISTENCY      = _getBTSavedSetting('score_consistency',       BT_DEFAULTS.SCORE_CONSISTENCY);
+    BT.USE_VOLATILITY_FILTER  = _getBTSavedSetting('use_volatility_filter',   BT_DEFAULTS.USE_VOLATILITY_FILTER);
 }
 
 function _onBTSettingChange(key, val) {
@@ -679,17 +743,127 @@ async function _launchBacktest(f, t) {
   }
 }
 
+/* ── Pair exclusion helpers ─────────────────────────────── */
+function _getExcludedPairs() {
+  try { return JSON.parse(localStorage.getItem('bt_excluded_pairs') || '[]'); }
+  catch (_) { return []; }
+}
+
+function _toggleExcludedPair(pairKey) {
+  const excl = _getExcludedPairs();
+  const idx  = excl.indexOf(pairKey);
+  if (idx >= 0) excl.splice(idx, 1); else excl.push(pairKey);
+  localStorage.setItem('bt_excluded_pairs', JSON.stringify(excl));
+  // Re-render live if results are visible
+  if (window._lastAutoResult) {
+    const c = document.getElementById('bt-auto-result');
+    if (c) c.innerHTML = _buildAutoBacktestResult(window._lastAutoResult);
+  }
+}
+
+function _clearExcludedPairs() {
+  localStorage.removeItem('bt_excluded_pairs');
+  if (window._lastAutoResult) {
+    const c = document.getElementById('bt-auto-result');
+    if (c) c.innerHTML = _buildAutoBacktestResult(window._lastAutoResult);
+  }
+}
+
+/* ── Copy all-pairs export to clipboard ─────────────────── */
+async function _copyAutoBacktestExport() {
+  const result = window._lastAutoResult;
+  if (!result) return;
+
+  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
+                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
+                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
+                    : BT.BT_WINDOW_DAYS >= 55  ? '~3mo'
+                    :                            '~1mo';
+
+  const data = {
+    _note: 'All-pairs backtest export — paste into Claude to get strategy analysis, improvement suggestions, and per-pair breakdown.',
+    exportTimestamp: new Date().toISOString(),
+    settings: {
+      backtestWindow:        windowLabel + ' (' + BT.BT_WINDOW_DAYS + ' trading days)',
+      minConfidenceScore:    BT.MIN_SCORE,
+      atrStopLossMultiplier: BT.ATR_SL,
+      riskRewardRatio:       BT.RR,
+      ema200TrendFilter:     BT.USE_TREND_FILTER,
+      requireWeeklyAlign:    BT.REQUIRE_WEEKLY_ALIGN,
+      requireStrongSignal:   BT.REQUIRE_STRONG_SIGNAL,
+      rsiFilter:             BT.RSI_FILTER,
+      macdConfirmation:      BT.MACD_CONFIRM,
+      trailingStop:          BT.USE_TRAILING_STOP
+                               ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
+                               : false,
+      breakevenTriggerRR:    BT.BREAKEVEN_TRIGGER_RR,
+      reversalExitScore:     BT.REVERSAL_EXIT_SCORE,
+      safetyCapDays:         BT.MAX_HOLD_DAYS,
+      scoreConsistencyBars:  BT.SCORE_CONSISTENCY,
+      volatilityFilter:      BT.USE_VOLATILITY_FILTER,
+    },
+    summary: {
+      pairsTested:   result.pairs.length,
+      excludedPairs: _getExcludedPairs(),
+      avgScore:      result.avgScore,
+      avgWinRate:    result.avgWinRate + '%',
+      totalPips:     +parseFloat(result.totalPips).toFixed(1),
+    },
+    pairs: result.pairs.map(p => ({
+      pair:               p.pair,
+      profitabilityScore: p.profitabilityScore,
+      totalTrades:        p.totalTrades,
+      wins:               p.wins,
+      losses:             p.losses,
+      winRate:            p.winRate + '%',
+      totalPips:          +parseFloat(p.totalPips).toFixed(1),
+      profitFactor:       p.profitFactor,
+      maxDrawdownPips:    +parseFloat(p.maxDrawdownPips).toFixed(1),
+      avgWinPips:         +parseFloat(p.avgWin).toFixed(1),
+      avgLossPips:        +parseFloat(p.avgLoss).toFixed(1),
+    })),
+  };
+
+  const text = JSON.stringify(data, null, 2);
+  const btn  = document.getElementById('bt-auto-copy-btn');
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied to clipboard!';
+      btn.classList.add('bt-copy-btn--done');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('bt-copy-btn--done'); }, 2800);
+    }
+  } catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    if (btn) {
+      btn.textContent = '✓ Copied (fallback)';
+      setTimeout(() => { btn.textContent = 'Copy All Results'; }, 2500);
+    }
+  }
+}
+
 async function _launchAutoBacktest() {
   const container = document.getElementById('bt-auto-result');
   if (!container) return;
   _updateBTState();
-  container.innerHTML = `<div class="analysis-loading"><div class="loader"></div><span id="bt-auto-progress">Fetching pair 1…</span></div>`;
+  const excluded = _getExcludedPairs();
+  const totalPairs = CFG.PAIRS.slice(0, 12).length;
+  const testingCount = totalPairs - excluded.length;
+  container.innerHTML = `<div class="analysis-loading"><div class="loader"></div><span id="bt-auto-progress">Fetching pair 1 of ${testingCount}…</span></div>`;
   const onProgress = (i, total, pair) => {
     const el = document.getElementById('bt-auto-progress');
     if (el) el.textContent = `Testing ${pair} (${i + 1}/${total})…`;
   };
   try {
     const result = await runAutoBacktest(onProgress);
+    window._lastAutoResult = result;
     container.innerHTML = _buildAutoBacktestResult(result);
   } catch (err) {
     container.innerHTML = `<div class="analysis-error">Auto-test failed: ${err.message}</div>`;
@@ -1412,6 +1586,7 @@ function appendBacktestSection(panel, f, t) {
         </label>
         <div class="bt-setting-ctrl">
           <select id="bt-window-days" class="bt-select" onchange="_onBTSettingChange('window_days', this.value)">
+            <option value="30"  ${BT.BT_WINDOW_DAYS === 30  ? 'selected' : ''}>1 month (~30 days)</option>
             <option value="66"  ${BT.BT_WINDOW_DAYS === 66  ? 'selected' : ''}>3 months (~66 days)</option>
             <option value="130" ${BT.BT_WINDOW_DAYS === 130 ? 'selected' : ''}>6 months (~130 days)</option>
             <option value="365" ${BT.BT_WINDOW_DAYS === 365 ? 'selected' : ''}>1 year (~365 days)</option>
@@ -1485,6 +1660,26 @@ function appendBacktestSection(panel, f, t) {
           <input type="checkbox" id="bt-macd-confirm" ${BT.MACD_CONFIRM ? 'checked' : ''} onchange="_onBTSettingChange('macd_confirm', this.checked)">
         </div>
       </div>
+
+      <div class="bt-setting-divider">Short-Term Performance Filters</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-score-consistency">Signal Consistency (bars)
+          <span class="bt-setting-hint">Require last N bars to signal the same direction before entry — cuts whipsaw entries in choppy markets. 0 = off, 2–3 recommended for short windows.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-score-consistency" min="0" max="4" value="${BT.SCORE_CONSISTENCY}" step="1" oninput="_onBTSettingChange('score_consistency', this.value)">
+          <span id="bt-score-consistency-val" class="bt-range-val">${BT.SCORE_CONSISTENCY}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-use-volatility-filter">Volatility Expansion Filter
+          <span class="bt-setting-hint">Skip entries when today's candle range is below 75% of the 20-bar average — avoids ranging/compressing markets that punish trend-following.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-use-volatility-filter" ${BT.USE_VOLATILITY_FILTER ? 'checked' : ''} onchange="_onBTSettingChange('use_volatility_filter', this.checked)">
+        </div>
+      </div>
     </div>
     <div class="bt-intro">
       Fully automated walk-forward simulation on up to 5 years of real daily candles.
@@ -1526,4 +1721,8 @@ window.appendBacktestSection   = appendBacktestSection;
 window._onBTSettingChange      = _onBTSettingChange;
 window._renderBtTradeChart     = _renderBtTradeChart;
 window._copyBacktestExport     = _copyBacktestExport;
+window._copyAutoBacktestExport = _copyAutoBacktestExport;
 window._buildExportData        = _buildExportData;
+window._getExcludedPairs       = _getExcludedPairs;
+window._toggleExcludedPair     = _toggleExcludedPair;
+window._clearExcludedPairs     = _clearExcludedPairs;
