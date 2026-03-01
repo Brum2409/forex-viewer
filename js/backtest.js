@@ -19,6 +19,9 @@ const BT_DEFAULTS = {
   REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
   RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
   MACD_CONFIRM:          false,   // daily MACD histogram must align with trade direction
+  // ── Window & hold constraints ────────────────────────────
+  BT_WINDOW_DAYS: 66,    // backtest only the last N trading bars (≈3 months)
+  MAX_HOLD_DAYS:  3,     // force-close any trade held more than this many bars
 };
 
 // Global BT object to hold current settings
@@ -86,14 +89,20 @@ function _btSignal(candles, pipSize) {
 }
 
 /* ── Walk-forward simulation ─────────────────────────────── */
+// Only opens trades within the last BT.BT_WINDOW_DAYS bars so we
+// backtest 1–3 months of real market data rather than 2 full years.
+// Forces close of any trade held longer than BT.MAX_HOLD_DAYS bars.
 function _walkForward(candles, pipSize) {
   const trades   = [];
   let   position = null;
 
-  for (let i = BT.WARMUP; i < candles.length - 1; i++) {
+  // Only enter new trades inside the recent window; signal computation
+  // still uses the full candle history for accurate indicators.
+  const btWindowStart = Math.max(BT.WARMUP, candles.length - BT.BT_WINDOW_DAYS);
+
+  for (let i = btWindowStart; i < candles.length - 1; i++) {
     const next = candles[i + 1];
-    const candleSlice = candles.slice(0, i + 1);
-    const sig = _btSignal(candleSlice, pipSize);
+    const sig  = _btSignal(candles.slice(0, i + 1), pipSize);
 
     /* ── Manage open position ───────────────────────── */
     if (position) {
@@ -101,8 +110,15 @@ function _walkForward(candles, pipSize) {
       const lo = next.low  ?? next.rate;
       let exitPrice = null, exitType = null;
 
-      // Trailing stop update
-      if (BT.USE_TRAILING_STOP && sig && sig.atr) {
+      // Force-close if held for MAX_HOLD_DAYS bars (open at next bar's open)
+      const barsHeld = (i + 1) - position.entryBar;
+      if (barsHeld >= BT.MAX_HOLD_DAYS) {
+        exitPrice = next.open ?? next.rate;
+        exitType  = 'TIME';
+      }
+
+      // Trailing stop update (only if not already exiting by time)
+      if (!exitPrice && BT.USE_TRAILING_STOP && sig && sig.atr) {
         if (position.direction === 'LONG') {
           const triggerPrice = position.entry + (position.tp - position.entry) / BT.RR * BT.TSL_TRIGGER_RR;
           if (hi > triggerPrice) {
@@ -116,19 +132,23 @@ function _walkForward(candles, pipSize) {
         }
       }
 
-      if (position.direction === 'LONG') {
-        if (lo  <= position.sl)  { exitPrice = position.sl; exitType = 'SL'; }
-        else if (hi >= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
-      } else { // SHORT
-        if (hi >= position.sl)   { exitPrice = position.sl; exitType = 'SL'; }
-        else if (lo <= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
+      // SL / TP check (only if not already exiting)
+      if (!exitPrice) {
+        if (position.direction === 'LONG') {
+          if (lo  <= position.sl)     { exitPrice = position.sl; exitType = 'SL'; }
+          else if (hi >= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
+        } else { // SHORT
+          if (hi >= position.sl)      { exitPrice = position.sl; exitType = 'SL'; }
+          else if (lo <= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
+        }
       }
 
       if (exitPrice !== null) {
         const pips = position.direction === 'LONG'
           ? (exitPrice - position.entry) / pipSize
           : (position.entry - exitPrice) / pipSize;
-        trades.push({ ...position, exit: exitPrice, exitType, pips, exitBar: i + 1, exitTs: next.ts });
+        trades.push({ ...position, exit: exitPrice, exitType, pips,
+                      exitBar: i + 1, exitTs: next.ts });
         position = null;
       }
     }
@@ -182,13 +202,14 @@ function _walkForward(candles, pipSize) {
     }
   }
 
-  /* Force-close open position at last price */
+  /* Force-close open position at end of window */
   if (position) {
     const last = candles[candles.length - 1];
     const pips = position.direction === 'LONG'
       ? (last.rate - position.entry) / pipSize
       : (position.entry - last.rate) / pipSize;
-    trades.push({ ...position, exit: last.rate, exitType: 'OPEN', pips, exitBar: candles.length - 1, exitTs: last.ts });
+    trades.push({ ...position, exit: last.rate, exitType: 'OPEN', pips,
+                  exitBar: candles.length - 1, exitTs: last.ts });
   }
 
   return trades;
@@ -246,15 +267,21 @@ function _btStats(trades) {
 async function runBacktest(f, t) {
   _updateBTState(); // Sync global BT object with UI settings
   const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
+  // Fetch up to 2 years so EMA200 (200-bar warmup) is properly initialised,
+  // but trades are only taken in the last BT.BT_WINDOW_DAYS bars.
   const candles = await fetchYahooFinanceChart(f, t, '1D');
 
-  if (!candles || candles.length < BT.WARMUP + 20) {
-    return { error: `Need ≥ ${BT.WARMUP + 20} daily bars; got ${candles ? candles.length : 0}` };
+  if (!candles || candles.length < BT.WARMUP + 10) {
+    return { error: `Need ≥ ${BT.WARMUP + 10} daily bars; got ${candles ? candles.length : 0}` };
   }
 
-  const trades = _walkForward(candles, pipSize);
-  const stats  = _btStats(trades) || { totalTrades: 0, profitabilityScore: 0 };
-  return { ...stats, pair: `${f}/${t}`, bars: candles.length - BT.WARMUP };
+  const btWindowStart = Math.max(BT.WARMUP, candles.length - BT.BT_WINDOW_DAYS);
+  const trades  = _walkForward(candles, pipSize);
+  const stats   = _btStats(trades) || { totalTrades: 0, profitabilityScore: 0 };
+
+  // Return window candles so the trade chart can plot them
+  const windowCandles = candles.slice(btWindowStart);
+  return { ...stats, pair: `${f}/${t}`, bars: windowCandles.length, windowCandles };
 }
 
 /* ── Public: auto-test all configured pairs ──────────────── */
@@ -347,7 +374,9 @@ function _buildBacktestResult(result, f, t) {
     const cls  = tr.pips > 0 ? 'bt-tr-win' : tr.pips <= 0 ? 'bt-tr-loss' : '';
     const icon = tr.direction === 'LONG' ? '▲' : '▼';
     const sign = tr.pips >= 0 ? '+' : '';
-    const exit = tr.exitType === 'SL' ? 'SL' : tr.exitType === 'TP' ? 'TP' : '—';
+    const exit = tr.exitType === 'SL'   ? 'SL'
+               : tr.exitType === 'TP'   ? 'TP'
+               : tr.exitType === 'TIME' ? 'TIME' : '—';
     return `<div class="bt-trade-row ${cls}">
       <span class="bt-tr-dir">${icon}</span>
       <span class="bt-tr-exit">${exit}</span>
@@ -356,6 +385,7 @@ function _buildBacktestResult(result, f, t) {
   }).join('');
 
   const pipDigits = (result.pair || '').includes('JPY') ? 3 : 5;
+  // tr.ts and tr.exitTs are Unix milliseconds (stored by api.js as sec×1000)
   const allTradesTable = (trades && trades.length > 0) ? `
     <div class="bt-trades-wrap" style="margin-top: 24px;">
       <div class="bt-curve-label">Full Trade Log</div>
@@ -373,8 +403,8 @@ function _buildBacktestResult(result, f, t) {
         </div>
         ${trades.map(tr => `
           <div class="bt-log-row ${tr.pips > 0 ? 'bt-tr-win' : 'bt-tr-loss'}">
-            <span>${new Date(tr.ts * 1000).toLocaleDateString()}</span>
-            <span>${tr.exitTs ? new Date(tr.exitTs * 1000).toLocaleDateString() : '-'}</span>
+            <span>${new Date(tr.ts).toLocaleDateString()}</span>
+            <span>${tr.exitTs ? new Date(tr.exitTs).toLocaleDateString() : '-'}</span>
             <span title="${tr.direction}">${tr.direction === 'LONG' ? '▲' : '▼'} ${tr.direction}</span>
             <span>${tr.entry.toFixed(pipDigits)}</span>
             <span>${tr.sl.toFixed(pipDigits)}</span>
@@ -393,7 +423,7 @@ function _buildBacktestResult(result, f, t) {
       <div class="bt-score-num ${scoreCls}">${profitabilityScore}</div>
       <div class="bt-score-meta">
         <div class="bt-score-label ${scoreCls}">${scoreLabel}</div>
-        <div class="bt-score-sub">${bars} bars · ${settingsDesc}</div>
+        <div class="bt-score-sub">${bars} bars tested · ${settingsDesc}</div>
       </div>
       <div class="bt-score-bar-track">
         <div class="bt-score-bar-fill ${scoreCls}" style="width:${profitabilityScore}%"></div>
@@ -406,6 +436,19 @@ function _buildBacktestResult(result, f, t) {
       <div class="bt-metric"><span class="bt-m-lbl">Total Pips</span><span class="bt-m-val ${pipsCls}">${pipsSign}${totalPips}</span><span class="bt-m-sub">net result</span></div>
       <div class="bt-metric"><span class="bt-m-lbl">Max Drawdown</span><span class="bt-m-val">${maxDrawdownPips}p</span><span class="bt-m-sub">peak to trough</span></div>
       <div class="bt-metric"><span class="bt-m-lbl">Avg Win / Loss</span><span class="bt-m-val">${avgWin} / ${avgLoss}</span><span class="bt-m-sub">pips per trade</span></div>
+    </div>
+    <div class="bt-trade-chart-wrap">
+      <div class="bt-curve-label">Trade Chart — daily candles with entries &amp; exits</div>
+      <div class="bt-chart-legend">
+        <span class="bt-leg bt-leg-entry-long">▲ Long entry</span>
+        <span class="bt-leg bt-leg-entry-short">▼ Short entry</span>
+        <span class="bt-leg bt-leg-sl">● SL exit</span>
+        <span class="bt-leg bt-leg-tp">● TP exit</span>
+        <span class="bt-leg bt-leg-time">● Time exit</span>
+        <span class="bt-leg bt-leg-sl-line">— SL level</span>
+        <span class="bt-leg bt-leg-tp-line">— TP level</span>
+      </div>
+      <div id="bt-trade-chart" class="bt-trade-chart"></div>
     </div>
     ${curveSvg ? `<div class="bt-curve-wrap"><div class="bt-curve-label">Equity Curve (pips)</div>${curveSvg}</div>` : ''}
     ${recentTrades ? `<div class="bt-trades-wrap"><div class="bt-curve-label">Recent Trades</div><div class="bt-trades">${recentTrades}</div></div>` : ''}
@@ -468,6 +511,8 @@ function _updateBTState() {
     BT.REQUIRE_STRONG_SIGNAL = _getBTSavedSetting('require_strong_signal',  BT_DEFAULTS.REQUIRE_STRONG_SIGNAL);
     BT.RSI_FILTER            = _getBTSavedSetting('rsi_filter',             BT_DEFAULTS.RSI_FILTER);
     BT.MACD_CONFIRM          = _getBTSavedSetting('macd_confirm',           BT_DEFAULTS.MACD_CONFIRM);
+    BT.BT_WINDOW_DAYS        = _getBTSavedSetting('window_days',            BT_DEFAULTS.BT_WINDOW_DAYS);
+    BT.MAX_HOLD_DAYS         = _getBTSavedSetting('max_hold_days',          BT_DEFAULTS.MAX_HOLD_DAYS);
 }
 
 function _onBTSettingChange(key, val) {
@@ -485,6 +530,7 @@ async function _launchBacktest(f, t) {
   try {
     const result = await runBacktest(f, t);
     container.innerHTML = _buildBacktestResult(result, f, t);
+    _renderBtTradeChart(result);  // render after HTML is in the DOM
   } catch (err) {
     container.innerHTML = `<div class="analysis-error">Backtest failed: ${err.message}</div>
       <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">Retry</button>`;
@@ -790,6 +836,192 @@ async function _launchOptimizer() {
   }
 }
 
+/* ── Trade chart: candlestick + entry/exit markers + SL/TP lines ─── */
+// Renders a TradingView Lightweight Charts candlestick chart inside
+// the #bt-trade-chart container created by _buildBacktestResult.
+// Shows window-period candles with overlaid trade annotations.
+function _renderBtTradeChart(result) {
+  const container = document.getElementById('bt-trade-chart');
+  if (!container || !window.LightweightCharts) return;
+
+  // Tear down any previous bt chart instance
+  if (window._btChartInst) {
+    try { window._btChartInst.remove(); } catch (_) {}
+    window._btChartInst = null;
+  }
+  if (window._btChartResizeObs) {
+    window._btChartResizeObs.disconnect();
+    window._btChartResizeObs = null;
+  }
+
+  const candles = result.windowCandles;
+  const trades  = result.trades || [];
+  if (!candles || !candles.length) {
+    container.textContent = 'No candle data for chart.';
+    return;
+  }
+
+  const pairStr   = result.pair || '';
+  const isJPY     = pairStr.includes('JPY');
+  const precision = isJPY ? 3 : 5;
+  const minMove   = Math.pow(10, -precision);
+  const priceFormat = { type: 'price', precision, minMove };
+
+  const chart = LightweightCharts.createChart(container, {
+    width:  container.clientWidth  || 360,
+    height: 240,
+    layout: {
+      background:  { type: 'solid', color: 'transparent' },
+      textColor:   '#6E7681',
+      fontFamily:  '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontSize:    10,
+    },
+    grid: {
+      vertLines: { color: '#1E2530' },
+      horzLines: { color: '#1E2530' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: {
+      borderColor:  '#30363D',
+      scaleMargins: { top: 0.15, bottom: 0.15 },
+    },
+    timeScale: {
+      borderColor:    '#30363D',
+      timeVisible:    false,
+      fixLeftEdge:    true,
+      fixRightEdge:   true,
+    },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
+    handleScale:  { mouseWheel: true, pinch: true },
+  });
+  window._btChartInst = chart;
+
+  // ── Candlestick series ──────────────────────────────────
+  const candleSeries = chart.addCandlestickSeries({
+    upColor:         '#3FB950',
+    downColor:       '#F85149',
+    borderUpColor:   '#3FB950',
+    borderDownColor: '#F85149',
+    wickUpColor:     '#3FB950',
+    wickDownColor:   '#F85149',
+    priceFormat,
+  });
+
+  const seenTimes = new Set();
+  const chartData = candles
+    .map(d => ({
+      time:  Math.floor(d.ts / 1000),       // ms → unix seconds for LWC
+      open:  d.open  ?? d.rate,
+      high:  d.high  ?? d.rate,
+      low:   d.low   ?? d.rate,
+      close: d.rate,
+    }))
+    .filter(d => {
+      if (seenTimes.has(d.time)) return false;
+      seenTimes.add(d.time); return true;
+    })
+    .sort((a, b) => a.time - b.time);
+
+  candleSeries.setData(chartData);
+  const chartTimeSet = new Set(chartData.map(d => d.time));
+  const chartTimes   = chartData.map(d => d.time);
+
+  // ── Markers (entry arrows + exit circles) ───────────────
+  const markers = [];
+  for (const tr of trades) {
+    const entryTime = Math.floor(tr.ts / 1000);
+    const exitTime  = tr.exitTs ? Math.floor(tr.exitTs / 1000) : null;
+
+    // Entry arrow — yellow, above/below bar depending on direction
+    if (chartTimeSet.has(entryTime)) {
+      markers.push({
+        time:     entryTime,
+        position: tr.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color:    '#F0B72F',
+        shape:    tr.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text:     'E',
+        size:     1,
+      });
+    }
+
+    // Exit circle — red=SL, green=TP, purple=TIME, grey=force close
+    if (exitTime && chartTimeSet.has(exitTime)) {
+      const exitColor = tr.exitType === 'SL'   ? '#F85149'
+                      : tr.exitType === 'TP'   ? '#3FB950'
+                      : tr.exitType === 'TIME' ? '#A371F7'
+                      :                          '#8B949E';
+      const exitText  = tr.exitType === 'SL'   ? 'SL'
+                      : tr.exitType === 'TP'   ? 'TP'
+                      : tr.exitType === 'TIME' ? 'T'
+                      :                          'X';
+      markers.push({
+        time:     exitTime,
+        position: tr.direction === 'LONG' ? 'aboveBar' : 'belowBar',
+        color:    exitColor,
+        shape:    'circle',
+        text:     exitText,
+        size:     1,
+      });
+    }
+  }
+  if (markers.length) {
+    markers.sort((a, b) => a.time - b.time);
+    candleSeries.setMarkers(markers);
+  }
+
+  // ── SL / TP / Entry-price line series ───────────────────
+  // Only supply data for bars during an active trade; LWC leaves gaps
+  // at times where no data is provided, so each trade shows its own
+  // isolated SL and TP lines without connecting between trades.
+  const slMap     = new Map();
+  const tpMap     = new Map();
+  const entryMap  = new Map();
+
+  for (const tr of trades) {
+    const tEntry = Math.floor(tr.ts / 1000);
+    const tExit  = tr.exitTs ? Math.floor(tr.exitTs / 1000)
+                             : chartTimes[chartTimes.length - 1];
+    for (const t of chartTimes) {
+      if (t >= tEntry && t <= tExit) {
+        slMap.set(t, tr.sl);
+        tpMap.set(t, tr.tp);
+        entryMap.set(t, tr.entry);
+      }
+    }
+  }
+
+  const toSeries = (map, color, lineStyle) => {
+    const data = Array.from(map.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([time, value]) => ({ time, value }));
+    if (!data.length) return;
+    const s = chart.addLineSeries({
+      color,
+      lineWidth:              1,
+      lineStyle,              // 0=solid, 2=dashed
+      crosshairMarkerVisible: false,
+      lastValueVisible:       false,
+      priceLineVisible:       false,
+      priceFormat,
+    });
+    s.setData(data);
+  };
+
+  toSeries(slMap,    'rgba(248,81,73,0.85)',  2); // red dashed  — stop-loss
+  toSeries(tpMap,    'rgba(63,185,80,0.85)',  2); // green dashed — take-profit
+  toSeries(entryMap, 'rgba(240,183,47,0.5)',  0); // gold solid  — entry price
+
+  chart.timeScale().fitContent();
+
+  // Keep chart responsive to panel width changes
+  window._btChartResizeObs = new ResizeObserver(() => {
+    if (chart && container.clientWidth > 0) {
+      chart.resize(container.clientWidth, container.clientHeight);
+    }
+  });
+  window._btChartResizeObs.observe(container);
+}
+
 /* ── Entry point called from detail.js ───────────────────── */
 function appendBacktestSection(panel, f, t) {
   _updateBTState(); // Load saved settings on init
@@ -860,6 +1092,30 @@ function appendBacktestSection(panel, f, t) {
         </div>
       </div>
 
+      <div class="bt-setting-divider">Backtest Window &amp; Trade Duration</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-bt-window-days">Backtest Period
+          <span class="bt-setting-hint">How many recent trading days to simulate</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <select id="bt-window-days" class="bt-select" onchange="_onBTSettingChange('window_days', this.value)">
+            <option value="22"  ${BT.BT_WINDOW_DAYS === 22  ? 'selected' : ''}>1 month (~22 days)</option>
+            <option value="44"  ${BT.BT_WINDOW_DAYS === 44  ? 'selected' : ''}>2 months (~44 days)</option>
+            <option value="66"  ${BT.BT_WINDOW_DAYS === 66  ? 'selected' : ''}>3 months (~66 days)</option>
+          </select>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-max-hold-days">Max Hold Days
+          <span class="bt-setting-hint">Force-close any trade held longer than this</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-max-hold-days" min="1" max="5" value="${BT.MAX_HOLD_DAYS}" step="1" oninput="_onBTSettingChange('max_hold_days', this.value)">
+          <span id="bt-max-hold-days-val" class="bt-range-val">${BT.MAX_HOLD_DAYS}</span>
+        </div>
+      </div>
+
       <div class="bt-setting-divider">Advanced Entry Filters</div>
 
       <div class="bt-setting-row">
@@ -900,7 +1156,7 @@ function appendBacktestSection(panel, f, t) {
       </div>
     </div>
     <div class="bt-intro">
-      Day-trader walk-forward on ~2 yrs of daily candles. Uses 4H/2H as primary signal timeframes with 1D/1W trend filters and configurable entry quality gates.
+      Walk-forward on real daily candles (1–3 month window, max 3-day hold). EMA200 is warmed on 2 years of data before trading begins. Signals use daily/weekly bias with ATR-based stops. The trade chart shows every entry, stop-loss level, take-profit level and exit.
     </div>
     <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">Run Backtest</button>
     <div id="bt-result"></div>
@@ -930,4 +1186,5 @@ window._launchOptimizer        = _launchOptimizer;
 window._applyOptimizerSettings = _applyOptimizerSettings;
 window._reRenderOptimizer      = _reRenderOptimizer;
 window.appendBacktestSection   = appendBacktestSection;
-window._onBTSettingChange    = _onBTSettingChange;
+window._onBTSettingChange      = _onBTSettingChange;
+window._renderBtTradeChart     = _renderBtTradeChart;
