@@ -916,7 +916,7 @@ input  { font-family: inherit; }
   font-size: 11px; align-items: center;
 }
 .bt-auto-row:last-of-type { border-bottom: none; }
-.bt-auto-pair { font-weight: 600; color: var(--txt1); }
+.bt-auto-pair { font-weight: 600; color: var(--txt1); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .bt-auto-score { font-weight: 700; font-variant-numeric: tabular-nums; }
 .bt-auto-wr    { color: var(--txt2); }
 .bt-auto-pips  { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -927,6 +927,53 @@ input  { font-family: inherit; }
   border-top: 1px solid var(--border);
   font-size: 11px; color: var(--txt2);
 }
+
+/* Exclude / Include buttons on auto-backtest rows */
+.bt-excl-btn, .bt-incl-btn {
+  font-size: 9px; font-weight: 700; padding: 1px 5px;
+  border-radius: 3px; cursor: pointer; white-space: nowrap;
+  transition: background var(--ease), color var(--ease);
+}
+.bt-excl-btn {
+  background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.35);
+  color: var(--red);
+}
+.bt-excl-btn:hover { background: rgba(248,81,73,0.25); }
+.bt-incl-btn {
+  background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.35);
+  color: var(--green);
+}
+.bt-incl-btn:hover { background: rgba(63,185,80,0.25); }
+
+/* Excluded pair row styling */
+.bt-auto-row--excluded {
+  opacity: 0.45;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent, transparent 4px,
+    rgba(255,255,255,0.02) 4px, rgba(255,255,255,0.02) 8px
+  );
+}
+
+/* Excluded pairs section */
+.bt-excl-section {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px;
+  background: rgba(248,81,73,0.07);
+  border-top: 1px solid rgba(248,81,73,0.2);
+  font-size: 10px; color: var(--txt3);
+}
+.bt-excl-label { flex: 1; min-width: 0; }
+.bt-excl-clear {
+  font-size: 9px; font-weight: 700; padding: 2px 7px;
+  border-radius: 3px; cursor: pointer; white-space: nowrap;
+  background: transparent; border: 1px solid rgba(248,81,73,0.4); color: var(--red);
+  transition: background var(--ease);
+}
+.bt-excl-clear:hover { background: rgba(248,81,73,0.15); }
+
+/* All-pairs copy row */
+.bt-auto-copy-row { margin-top: 8px; }
 
 /* EMA cross badges inside bias rows */
 .cross-badge {
