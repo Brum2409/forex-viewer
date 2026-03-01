@@ -145,6 +145,9 @@ function _btSignal(candles, pipSize) {
     ema200:         ind.ema200,
     monthlyBias:    monthlyBias.bias,
     weeklyBias:     weeklyBias.bias,
+    medBias:        medBias.bias,
+    shortBias:      shortBias.bias,
+    recentBias:     recentBias.bias,
     dailyRsi:       medInd ? medInd.rsi       : ind.rsi,
     dailyMacdHist:  medInd ? medInd.histogram : ind.histogram,
   };
@@ -298,9 +301,21 @@ function _walkForward(candles, pipSize) {
           if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
-            position = { direction, entry, sl, tp, entryBar: i + 1,
-                         score: sig.score, recommendation: sig.recommendation, ts: next.ts,
-                         breakevenMoved: false };
+            position = {
+              direction, entry, sl, tp, entryBar: i + 1,
+              score: sig.score, recommendation: sig.recommendation, ts: next.ts,
+              breakevenMoved: false,
+              // Full entry-signal context captured for export/analysis
+              entryFactors:  sig.factors      || [],
+              monthlyBias:   sig.monthlyBias,
+              weeklyBias:    sig.weeklyBias,
+              medBias:       sig.medBias,
+              shortBias:     sig.shortBias,
+              recentBias:    sig.recentBias,
+              atrAtEntry:    sig.atr,
+              rsiAtEntry:    sig.dailyRsi,
+              ema200AtEntry: sig.ema200,
+            };
           }
         }
       }
@@ -567,6 +582,16 @@ function _buildBacktestResult(result, f, t) {
     ${curveSvg ? `<div class="bt-curve-wrap"><div class="bt-curve-label">Equity Curve (pips)</div>${curveSvg}</div>` : ''}
     ${recentTrades ? `<div class="bt-trades-wrap"><div class="bt-curve-label">Recent Trades</div><div class="bt-trades">${recentTrades}</div></div>` : ''}
     ${allTradesTable}
+    <div class="bt-copy-row">
+      <button id="bt-copy-btn" class="bt-copy-btn" onclick="_copyBacktestExport()">
+        Copy Full Analysis Export
+      </button>
+      <span class="bt-copy-hint">
+        Copies all settings, statistics, per-trade signal context (5-TF biases, score breakdown,
+        RSI/ATR/EMA200 at entry) and surrounding OHLCV candles — paste into Claude for a
+        detailed strategy assessment.
+      </span>
+    </div>
     <button class="bt-auto-btn" onclick="_launchAutoBacktest()">Test All Pairs</button>
     <div id="bt-auto-result"></div>`;
 }
@@ -645,6 +670,7 @@ async function _launchBacktest(f, t) {
   container.innerHTML = `<div class="analysis-loading"><div class="loader"></div><span>Running walk-forward simulation...</span></div>`;
   try {
     const result = await runBacktest(f, t);
+    window._lastBtResult = result;  // stored for copy-export
     container.innerHTML = _buildBacktestResult(result, f, t);
     _renderBtTradeChart(result);  // render after HTML is in the DOM
   } catch (err) {
@@ -1167,6 +1193,147 @@ function _renderBtTradeChart(result) {
   window._btChartResizeObs.observe(container);
 }
 
+/* ── Full export builder ─────────────────────────────────── */
+// Assembles every piece of information needed for a thorough external
+// assessment: settings, statistics, per-trade signal context (all 5 TF
+// biases, score breakdown, RSI/ATR/EMA200 at entry) and the raw OHLCV
+// candles surrounding each trade so price action can be reviewed.
+function _buildExportData(result) {
+  const pipDigits    = (result.pair || '').includes('JPY') ? 3 : 5;
+  const windowCandles = result.windowCandles || [];
+
+  const tradesExport = (result.trades || []).map(tr => {
+    // Locate trade within window candles and grab ±10 / +5 bars of context
+    const entryIdx = windowCandles.findIndex(c => c.ts >= tr.ts);
+    const rawExit  = tr.exitTs || (windowCandles.length ? windowCandles[windowCandles.length - 1].ts : 0);
+    const exitIdx  = windowCandles.findIndex(c => c.ts >= rawExit);
+    const ctxStart = Math.max(0, (entryIdx >= 0 ? entryIdx : 0) - 10);
+    const ctxEnd   = Math.min(windowCandles.length - 1,
+                              (exitIdx   >= 0 ? exitIdx  : windowCandles.length - 1) + 5);
+
+    const priceContext = windowCandles.slice(ctxStart, ctxEnd + 1).map(c => ({
+      date:  new Date(c.ts).toISOString().split('T')[0],
+      open:  +(c.open ?? c.rate).toFixed(pipDigits),
+      high:  +(c.high ?? c.rate).toFixed(pipDigits),
+      low:   +(c.low  ?? c.rate).toFixed(pipDigits),
+      close: +(c.rate).toFixed(pipDigits),
+      // mark entry/exit bars for clarity
+      _mark: c.ts === tr.ts        ? 'ENTRY'
+           : c.ts === tr.exitTs    ? 'EXIT'
+           : undefined,
+    }));
+
+    const fmt = v => v != null ? +v.toFixed(pipDigits) : null;
+
+    return {
+      entryDate:     new Date(tr.ts).toISOString().split('T')[0],
+      exitDate:      tr.exitTs ? new Date(tr.exitTs).toISOString().split('T')[0] : null,
+      direction:     tr.direction,
+      barsHeld:      tr.exitBar != null ? tr.exitBar - tr.entryBar : null,
+      outcome:       tr.pips > 0 ? 'WIN' : 'LOSS',
+      pips:          +tr.pips.toFixed(2),
+      exitReason:    tr.exitType,
+      breakevenUsed: tr.breakevenMoved || false,
+      prices: {
+        entry:       fmt(tr.entry),
+        stopLoss:    fmt(tr.sl),
+        takeProfit:  fmt(tr.tp),
+        exit:        fmt(tr.exit),
+      },
+      signalAtEntry: {
+        confidenceScore:    tr.score,
+        recommendation:     tr.recommendation,
+        // 5-level TF hierarchy at moment of entry
+        monthlyMacroTrend:  tr.monthlyBias  || 'UNKNOWN',
+        weeklyTrend:        tr.weeklyBias   || 'UNKNOWN',
+        mediumTerm_60d:     tr.medBias      || 'UNKNOWN',
+        shortTerm_20d:      tr.shortBias    || 'UNKNOWN',
+        recentMomentum_10d: tr.recentBias   || 'UNKNOWN',
+        rsi:                tr.rsiAtEntry    != null ? +tr.rsiAtEntry.toFixed(1)    : null,
+        atr:                tr.atrAtEntry    != null ? +tr.atrAtEntry.toFixed(pipDigits) : null,
+        ema200:             tr.ema200AtEntry != null ? +tr.ema200AtEntry.toFixed(pipDigits) : null,
+        // Full score breakdown — every factor that pushed the bot to trade
+        scoreBreakdown: (tr.entryFactors || []).map(f => ({
+          factor: f.label,
+          detail: String(f.value),
+          points: f.points,
+        })),
+      },
+      // Raw OHLCV bars 10 before entry → 5 after exit (entry/exit bars marked)
+      priceContext,
+    };
+  });
+
+  return {
+    _note: 'Paste this JSON into Claude to get a full strategy assessment, ' +
+           'improvement suggestions, and trade-by-trade analysis.',
+    exportTimestamp: new Date().toISOString(),
+    pair:            result.pair,
+    settings: {
+      backtestWindow:       BT.BT_WINDOW_DAYS + ' trading days',
+      minConfidenceScore:   BT.MIN_SCORE,
+      atrStopLossMultiplier: BT.ATR_SL,
+      riskRewardRatio:      BT.RR,
+      ema200TrendFilter:    BT.USE_TREND_FILTER,
+      requireWeeklyAlign:   BT.REQUIRE_WEEKLY_ALIGN,
+      requireStrongSignal:  BT.REQUIRE_STRONG_SIGNAL,
+      rsiFilter:            BT.RSI_FILTER,
+      macdConfirmation:     BT.MACD_CONFIRM,
+      trailingStop:         BT.USE_TRAILING_STOP
+                              ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
+                              : false,
+      breakevenTriggerRR:   BT.BREAKEVEN_TRIGGER_RR,
+      reversalExitScore:    BT.REVERSAL_EXIT_SCORE,
+      safetyCapDays:        BT.MAX_HOLD_DAYS,
+    },
+    statistics: {
+      totalTrades:        result.totalTrades,
+      wins:               result.wins,
+      losses:             result.losses,
+      winRate:            result.winRate + '%',
+      totalPips:          +parseFloat(result.totalPips).toFixed(1),
+      grossWinPips:       +parseFloat(result.grossWin).toFixed(1),
+      grossLossPips:      +parseFloat(result.grossLoss).toFixed(1),
+      profitFactor:       result.profitFactor,
+      maxDrawdownPips:    +parseFloat(result.maxDrawdownPips).toFixed(1),
+      avgWinPips:         +parseFloat(result.avgWin).toFixed(1),
+      avgLossPips:        +parseFloat(result.avgLoss).toFixed(1),
+      profitabilityScore: result.profitabilityScore,
+      equityCurveByTrade: result.equityCurve || [],
+    },
+    trades: tradesExport,
+  };
+}
+
+/* ── Copy export to clipboard ────────────────────────────── */
+async function _copyBacktestExport() {
+  const result = window._lastBtResult;
+  if (!result) return;
+  const data = _buildExportData(result);
+  const text = JSON.stringify(data, null, 2);
+  const btn  = document.getElementById('bt-copy-btn');
+
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied to clipboard!';
+      btn.classList.add('bt-copy-btn--done');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('bt-copy-btn--done'); }, 2800);
+    }
+  } catch (_) {
+    // Fallback for browsers without clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    if (btn) { btn.textContent = '✓ Copied (fallback)'; setTimeout(() => { btn.textContent = 'Copy Full Analysis'; }, 2500); }
+  }
+}
+
 /* ── Entry point called from detail.js ───────────────────── */
 function appendBacktestSection(panel, f, t) {
   _updateBTState(); // Load saved settings on init
@@ -1358,3 +1525,5 @@ window._reRenderOptimizer      = _reRenderOptimizer;
 window.appendBacktestSection   = appendBacktestSection;
 window._onBTSettingChange      = _onBTSettingChange;
 window._renderBtTradeChart     = _renderBtTradeChart;
+window._copyBacktestExport     = _copyBacktestExport;
+window._buildExportData        = _buildExportData;
