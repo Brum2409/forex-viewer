@@ -1,33 +1,54 @@
 /* ============================================================
    BACKTESTING ENGINE
-   Walk-forward simulation on daily candles. No look-ahead:
+   Walk-forward simulation on 1-hour candles. No look-ahead:
    signals are generated only from data[0..i], trade entered
    at data[i+1].open with ATR-based SL and 2:1 R:R take-profit.
+   Targets 1–5 trades per week using a genuine 5-level 1H
+   multi-timeframe hierarchy: weekly → daily → 4H → 2H → 1H.
    ============================================================ */
 
 const BT_DEFAULTS = {
-  WARMUP:               200,   // bars for EMA200 + indicator warm-up
-  ATR_SL:               2.0,   // stop-loss = ATR × this
+  WARMUP:               800,   // 1H bars for indicator warm-up (~33 trading days, ensures 4H EMA context)
+  ATR_SL:               2.0,   // stop-loss = 1H ATR × this
   RR:                   2.0,   // take-profit = SL distance × R:R
   MIN_SCORE:            50,    // minimum |confidence score| to open a trade
-  USE_TREND_FILTER:     true,  // apply EMA200 + monthly/weekly trend filter
+  USE_TREND_FILTER:     true,  // apply 1H EMA200 + weekly/daily macro trend filter
   USE_TRAILING_STOP:    false, // use a trailing stop-loss
   TSL_FACTOR:           1.5,   // trailing stop ATR factor
   TSL_TRIGGER_RR:       1.0,   // R:R multiple to activate trailing stop
   // ── Entry quality filters ────────────────────────────────
-  REQUIRE_WEEKLY_ALIGN:  false,   // require weekly bias to match direction (no NEUTRAL)
+  REQUIRE_WEEKLY_ALIGN:  false,   // require daily-context bias to match direction (no NEUTRAL)
   REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
   RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
-  MACD_CONFIRM:          false,   // daily MACD histogram must align with trade direction
+  MACD_CONFIRM:          false,   // 4H MACD histogram must align with trade direction
   // ── Window & hold constraints ────────────────────────────
-  BT_WINDOW_DAYS:       365,   // backtest last N trading bars (~1 year default)
-  MAX_HOLD_DAYS:         60,   // soft safety cap — bot exits via signals/trail/breakeven first
+  BT_WINDOW_DAYS:       1560,  // backtest last N 1H bars (~3 months, ~1–5 trades/week pace)
+  MAX_HOLD_DAYS:        120,   // soft safety cap in 1H bars (120 = 5 trading days)
   // ── Intelligent exit controls ────────────────────────────
   BREAKEVEN_TRIGGER_RR:  1.0,  // move SL to entry once profit ≥ this × initial risk
   REVERSAL_EXIT_SCORE:   45,   // exit immediately if opposite-direction score reaches this
   // ── Short-term performance filters ──────────────────────
-  SCORE_CONSISTENCY:     0,    // require last N bars to signal same direction (0 = off, 2-3 practical)
+  SCORE_CONSISTENCY:     2,    // require last N 1H bars to signal same direction (2 = balanced noise filter)
   USE_VOLATILITY_FILTER: false,// skip entries when current bar's range < 75% of 20-bar avg (avoids ranging)
+  // ── Partial take-profit ──────────────────────────────────
+  PARTIAL_TP:            false, // close part of position at an early R:R target
+  PARTIAL_TP_RR:         1.0,  // R:R multiple that triggers the partial close
+  PARTIAL_TP_PCT:        50,   // % of position to close at partial TP (remainder rides to full TP)
+  // ── Re-entry cooldown ────────────────────────────────────
+  RE_ENTRY_COOLDOWN:     0,    // min bars between any exit and next entry (0 = off)
+  LOSS_COOLDOWN:         0,    // extra bars to wait after a losing trade specifically (0 = off)
+  // ── Multi-timeframe consensus ────────────────────────────
+  MIN_TF_CONSENSUS:      0,    // min number of the 5 TFs that must agree with direction (0 = off)
+  REQUIRE_TREND_ALIGN:   false,// all 3 trend TFs (weekly + daily + 4H) must point in direction
+  // ── Advanced entry confirmation ──────────────────────────
+  EMA_SLOPE_FILTER:      false,// 1H EMA200 must be sloping in trade direction (20-bar comparison)
+  CANDLE_CONFIRM:        false,// signal bar must close in the trade direction (bullish/bearish candle)
+  MONTHLY_STRICT:        false,// weekly macro bias must non-neutrally confirm (not just non-opposing)
+  // ── Dynamic stop management ──────────────────────────────
+  MOVE_SL_AT_PARTIAL:    false,// after partial TP, move SL to breakeven automatically
+  SCALE_IN:              false,// allow a second entry if score strengthens ≥ MIN_SCORE+15 while in trade
+  // ── Score-based position sizing ──────────────────────────
+  SCORE_WEIGHT_RISK:     false,// scale virtual risk by score magnitude (strong signal = 1.5× pip weight)
 };
 
 // Global BT object to hold current settings
@@ -43,116 +64,122 @@ const _BT_NEUTRAL_BIAS = {
 const _BT_EMPTY_ZONES = { supply: [], demand: [] };
 const _BT_NO_HS       = { found: false, type: null, neckline: null, headPrice: null, confidence: null };
 
-/* ── Weekly bias approximation from daily candles ────────── */
-// Groups every 5 daily bars into pseudo-weekly candles to give
-// the scorer a weekly-trend perspective without look-ahead bias.
-function _computeWeeklyFromDaily(dailyCandles, pipSize) {
-  if (!dailyCandles || dailyCandles.length < 10) return _BT_NEUTRAL_BIAS;
-  const weekly = [];
-  for (let i = 0; i < dailyCandles.length; i += 5) {
-    const g = dailyCandles.slice(i, i + 5);
-    if (g.length < 3) continue;
-    weekly.push({
+/* ── Generic 1H candle aggregator ────────────────────────── */
+// Groups every `barsPerGroup` 1H bars into higher-TF candles.
+// Used to build the weekly/daily/4H/2H context from raw 1H data.
+// Only processes the last `maxGroups` complete groups for efficiency.
+function _groupCandlesInto(candles, barsPerGroup, maxGroups = Infinity) {
+  if (!candles || candles.length < barsPerGroup) return [];
+  // Limit the input window so we never process more bars than needed
+  const neededBars = maxGroups === Infinity ? candles.length : maxGroups * barsPerGroup;
+  const src = candles.length > neededBars ? candles.slice(-neededBars) : candles;
+  const groups = [];
+  for (let i = 0; i < src.length; i += barsPerGroup) {
+    const g = src.slice(i, i + barsPerGroup);
+    if (g.length < Math.ceil(barsPerGroup / 2)) continue; // discard very short tail groups
+    groups.push({
       ts:   g[g.length - 1].ts,
-      open: g[0].open  || g[0].rate,
-      high: Math.max(...g.map(c => c.high || c.rate)),
-      low:  Math.min(...g.map(c => c.low  || c.rate)),
+      open: g[0].open  ?? g[0].rate,
+      high: Math.max(...g.map(c => c.high ?? c.rate)),
+      low:  Math.min(...g.map(c => c.low  ?? c.rate)),
       rate: g[g.length - 1].rate,
     });
   }
-  return weekly.length >= 5 ? detectBias(weekly, pipSize) : _BT_NEUTRAL_BIAS;
+  return groups;
 }
 
-/* ── Monthly bias approximation from daily candles ───────── */
-// Groups every 20 daily bars into pseudo-monthly candles to give
-// the scorer long-term macro context without look-ahead bias.
-function _computeMonthlyFromDaily(dailyCandles, pipSize) {
-  if (!dailyCandles || dailyCandles.length < 40) return _BT_NEUTRAL_BIAS;
-  const monthly = [];
-  for (let i = 0; i < dailyCandles.length; i += 20) {
-    const g = dailyCandles.slice(i, i + 20);
-    if (g.length < 10) continue;
-    monthly.push({
-      ts:   g[g.length - 1].ts,
-      open: g[0].open  || g[0].rate,
-      high: Math.max(...g.map(c => c.high || c.rate)),
-      low:  Math.min(...g.map(c => c.low  || c.rate)),
-      rate: g[g.length - 1].rate,
-    });
-  }
-  return monthly.length >= 3 ? detectBias(monthly, pipSize) : _BT_NEUTRAL_BIAS;
-}
-
-/* ── Signal from a fixed candle slice (no API calls) ─────── */
-// True 5-level multi-timeframe hierarchy built entirely from daily candles:
-//   'weekly'  slot ← monthly macro context   (group 20 bars → monthly candles)
-//   'daily'   slot ← weekly trend context    (group 5 bars  → weekly candles)
-//   'h4'      slot ← medium-term momentum   (last 60 daily bars)
-//   'h2'      slot ← short-term momentum    (last 20 daily bars)
-//   'h1'      slot ← recent entry timing    (last 10 daily bars)
-// This lets the scoring engine apply its full confluence logic:
-// higher TFs set trend direction, lower TFs time the entry.
+/* ── Signal from a fixed 1H candle slice (no API calls) ──── */
+// Genuine 5-level multi-timeframe hierarchy built from 1H candles:
+//   'weekly' slot ← weekly macro context  (group 120 1H bars → weekly candles)
+//   'daily'  slot ← daily trend           (group 24 1H bars  → daily candles,  last 60)
+//   'h4'     slot ← 4H momentum           (group 4 1H bars   → 4H candles,     last 120)
+//   'h2'     slot ← 2H momentum           (group 2 1H bars   → 2H candles,     last 48)
+//   'h1'     slot ← 1H entry timing       (raw 1H bars,                         last 24)
+// Higher TFs set trend direction; lower TFs time the entry.
+// Each timeframe uses only the bars it needs — no wasted computation.
 function _btSignal(candles, pipSize) {
-  // Full-history indicators — accurate EMA200/ATR anchored to all available history
-  const ind = computeIndicators(candles, pipSize);
-  if (!ind || !ind.atr) return null;
-
-  // 1. Monthly macro context
-  const monthlyBias = _computeMonthlyFromDaily(candles, pipSize);
-
-  // 2. Weekly trend
-  const weeklyBias  = _computeWeeklyFromDaily(candles, pipSize);
-
-  // 3. Medium-term momentum — last 60 bars (~3 months of daily data)
-  const medSlice  = candles.length > 60 ? candles.slice(-60) : candles;
-  const medBias   = detectBias(medSlice, pipSize);
-  const medInd    = computeIndicators(medSlice, pipSize);
-
-  // 4. Short-term momentum — last 20 bars (~1 month of daily data)
-  const shortSlice = candles.length > 20 ? candles.slice(-20) : candles;
-  const shortBias  = detectBias(shortSlice, pipSize);
-  const shortInd   = computeIndicators(shortSlice, pipSize);
-
-  // 5. Recent entry timing — last 10 bars (~2 weeks of daily data)
-  const recentSlice = candles.length > 10 ? candles.slice(-10) : candles;
-  const recentBias  = detectBias(recentSlice, pipSize);
-
   const currentPrice = candles[candles.length - 1].rate;
 
-  // Supply/demand zones at macro, medium, and short horizons
-  const longZones  = detectZones(candles, pipSize);
-  const medZones   = detectZones(medSlice, pipSize);
-  const shortZones = detectZones(shortSlice, pipSize);
+  // 1H indicators for EMA200 (trend filter) and ATR (position sizing)
+  // Use last 200 bars — sufficient for a stable 1H EMA200
+  const h1Window = candles.length > 200 ? candles.slice(-200) : candles;
+  const ind = computeIndicators(h1Window, pipSize);
+  if (!ind || !ind.atr) return null;
 
-  // Head & Shoulders across timeframes
-  const hs      = detectHeadAndShoulders(candles);
-  const shortHs = detectHeadAndShoulders(shortSlice);
+  // 1. Weekly macro context — group 120 1H bars → weekly candles (max 22 weeks)
+  const weeklyCandles = _groupCandlesInto(candles, 120, 22);
+  const weeklyBias    = weeklyCandles.length >= 5
+    ? detectBias(weeklyCandles, pipSize) : _BT_NEUTRAL_BIAS;
 
-  // Candlestick patterns
-  const cp      = detectCandlestickPatterns(candles);
-  const shortCp = detectCandlestickPatterns(shortSlice);
+  // 2. Daily trend — group 24 1H bars → daily candles, use last 60
+  const allDailyCandles = _groupCandlesInto(candles, 24, 65);
+  const dailyCandles    = allDailyCandles.length > 60 ? allDailyCandles.slice(-60) : allDailyCandles;
+  const dailyBias       = dailyCandles.length >= 5
+    ? detectBias(dailyCandles, pipSize) : _BT_NEUTRAL_BIAS;
+  const dailyInd        = dailyCandles.length >= 5
+    ? computeIndicators(dailyCandles, pipSize) : null;
+
+  // 3. 4H momentum — group 4 1H bars → 4H candles, use last 120
+  const allH4Candles = _groupCandlesInto(candles, 4, 125);
+  const h4Candles    = allH4Candles.length > 120 ? allH4Candles.slice(-120) : allH4Candles;
+  const h4Bias       = h4Candles.length >= 5
+    ? detectBias(h4Candles, pipSize) : _BT_NEUTRAL_BIAS;
+  const h4Ind        = h4Candles.length >= 5
+    ? computeIndicators(h4Candles, pipSize) : null;
+
+  // 4. 2H momentum — group 2 1H bars → 2H candles, use last 48
+  const allH2Candles = _groupCandlesInto(candles, 2, 50);
+  const h2Candles    = allH2Candles.length > 48 ? allH2Candles.slice(-48) : allH2Candles;
+  const h2Bias       = h2Candles.length >= 5
+    ? detectBias(h2Candles, pipSize) : _BT_NEUTRAL_BIAS;
+
+  // 5. 1H entry timing — raw 1H bars, last 24
+  const h1Slice    = candles.length > 24 ? candles.slice(-24) : candles;
+  const h1EntryBias = h1Slice.length >= 5
+    ? detectBias(h1Slice, pipSize) : _BT_NEUTRAL_BIAS;
+
+  // Supply/demand zones at weekly, daily, and 4H horizons
+  const weeklyZones = weeklyCandles.length >= 5 ? detectZones(weeklyCandles, pipSize) : _BT_EMPTY_ZONES;
+  const dailyZones  = dailyCandles.length  >= 5 ? detectZones(dailyCandles,  pipSize) : _BT_EMPTY_ZONES;
+  const h4Zones     = h4Candles.length     >= 5 ? detectZones(h4Candles,     pipSize) : _BT_EMPTY_ZONES;
+
+  // Head & Shoulders patterns at weekly, daily, and 4H
+  const weeklyHs = weeklyCandles.length >= 10 ? detectHeadAndShoulders(weeklyCandles) : _BT_NO_HS;
+  const dailyHs  = dailyCandles.length  >= 10 ? detectHeadAndShoulders(dailyCandles)  : _BT_NO_HS;
+  const h4Hs     = h4Candles.length     >= 10 ? detectHeadAndShoulders(h4Candles)     : _BT_NO_HS;
+
+  // Candlestick patterns at daily, 4H, and 2H (most actionable for entry timing)
+  const dailyCp = dailyCandles.length >= 5 ? detectCandlestickPatterns(dailyCandles) : [];
+  const h4Cp    = h4Candles.length    >= 5 ? detectCandlestickPatterns(h4Candles)    : [];
+  const h2Cp    = h2Candles.length    >= 5 ? detectCandlestickPatterns(h2Candles)    : [];
 
   const conf = calcConfidenceScore(
-    // Proper multi-TF hierarchy: monthly → weekly → medium → short → recent
-    { weekly: monthlyBias, daily: weeklyBias, h4: medBias, h2: shortBias, h1: recentBias, m30: _BT_NEUTRAL_BIAS },
-    { weekly: longZones,   daily: medZones,   h4: shortZones },
-    { weekly: _BT_NO_HS,   daily: hs,         h4: shortHs },
-    { daily: cp,           h4: shortCp,       h2: [] },
-    { daily: medInd || ind, h4: shortInd,     h2: null, h1: null, m30: null },
+    // Map genuine 1H hierarchy into scoring engine slots
+    { weekly: weeklyBias, daily: dailyBias, h4: h4Bias, h2: h2Bias, h1: h1EntryBias, m30: _BT_NEUTRAL_BIAS },
+    { weekly: weeklyZones, daily: dailyZones, h4: h4Zones },
+    { weekly: weeklyHs,    daily: dailyHs,    h4: h4Hs },
+    { daily: dailyCp, h4: h4Cp, h2: h2Cp },
+    { daily: dailyInd || ind, h4: h4Ind, h2: null, h1: null, m30: null },
     currentPrice, pipSize
   );
 
   return {
     ...conf,
-    atr:            ind.atr,
-    ema200:         ind.ema200,
-    monthlyBias:    monthlyBias.bias,
-    weeklyBias:     weeklyBias.bias,
-    medBias:        medBias.bias,
-    shortBias:      shortBias.bias,
-    recentBias:     recentBias.bias,
-    dailyRsi:       medInd ? medInd.rsi       : ind.rsi,
-    dailyMacdHist:  medInd ? medInd.histogram : ind.histogram,
+    atr:    ind.atr,
+    ema200: ind.ema200,  // 1H EMA200 (≈200-hour moving average) used for trend filter
+    // Legacy field names preserved so _walkForward filters work without changes:
+    //   monthlyBias → weekly macro context
+    //   weeklyBias  → daily trend context
+    //   medBias     → 4H momentum
+    //   shortBias   → 2H momentum
+    //   recentBias  → 1H entry timing
+    monthlyBias:   weeklyBias.bias,
+    weeklyBias:    dailyBias.bias,
+    medBias:       h4Bias.bias,
+    shortBias:     h2Bias.bias,
+    recentBias:    h1EntryBias.bias,
+    dailyRsi:      h4Ind ? h4Ind.rsi       : ind.rsi,
+    dailyMacdHist: h4Ind ? h4Ind.histogram : ind.histogram,
   };
 }
 
@@ -171,9 +198,14 @@ function _btSignal(candles, pipSize) {
 //     5. SL / TP hits.
 // No hard hold limit: the bot decides when a trade is done.
 function _walkForward(candles, pipSize) {
-  const trades      = [];
-  let   position    = null;
+  const trades       = [];
+  let   position     = null;
   const recentScores = []; // rolling buffer for score-consistency check (last 5 signals)
+  const ema200Hist   = []; // rolling EMA200 history for slope filter
+
+  // Cooldown tracking
+  let cooldownLeft     = 0; // bars before next entry allowed
+  let lastExitWasLoss  = false;
 
   // Only enter new trades inside the backtest window; signal computation
   // still uses the full candle history for accurate EMA200/ATR.
@@ -183,22 +215,50 @@ function _walkForward(candles, pipSize) {
     const next = candles[i + 1];
     const sig  = _btSignal(candles.slice(0, i + 1), pipSize);
 
-    // Track signal history for consistency filter
+    // Track signal + EMA200 history for advanced filters
     if (sig) {
       recentScores.push(sig.score);
       if (recentScores.length > 5) recentScores.shift();
+      ema200Hist.push(sig.ema200 ?? null);
+      if (ema200Hist.length > 30) ema200Hist.shift();
     }
+
+    // Decrement cooldown each bar
+    if (cooldownLeft > 0) cooldownLeft--;
 
     /* ── Manage open position ───────────────────────── */
     if (position) {
       const hi       = next.high ?? next.rate;
       const lo       = next.low  ?? next.rate;
-      const slDist   = Math.abs(position.entry - position.sl);
+      const slDist   = Math.abs(position.initSlDist); // use original SL distance
       const barsHeld = (i + 1) - position.entryBar;
       let exitPrice  = null, exitType = null;
 
-      // 1. Breakeven management: once profit ≥ BREAKEVEN_TRIGGER_RR × initial risk,
-      //    move SL to entry so this trade can no longer be a net loser.
+      // 0. Partial take-profit: close a portion of position at early target
+      if (BT.PARTIAL_TP && !position.partialTpTriggered) {
+        const partFrac  = BT.PARTIAL_TP_PCT / 100;
+        const ptpTarget = position.direction === 'LONG'
+          ? position.entry + slDist * BT.PARTIAL_TP_RR
+          : position.entry - slDist * BT.PARTIAL_TP_RR;
+        const ptpHit = position.direction === 'LONG' ? hi >= ptpTarget : lo <= ptpTarget;
+        if (ptpHit) {
+          // Record partial pips (weighted by fraction)
+          const ptpPips = (position.direction === 'LONG'
+            ? ptpTarget - position.entry
+            : position.entry - ptpTarget) / pipSize * partFrac;
+          position.partialTpPips      = ptpPips;
+          position.partialTpFrac      = partFrac;
+          position.remainingFrac      = 1 - partFrac;
+          position.partialTpTriggered = true;
+          // Optionally move SL to breakeven on partial TP
+          if (BT.MOVE_SL_AT_PARTIAL && !position.breakevenMoved) {
+            position.sl = position.entry;
+            position.breakevenMoved = true;
+          }
+        }
+      }
+
+      // 1. Breakeven management
       if (!position.breakevenMoved && slDist > 0) {
         const beTarget = BT.BREAKEVEN_TRIGGER_RR * slDist;
         const inProfit = position.direction === 'LONG'
@@ -210,7 +270,7 @@ function _walkForward(candles, pipSize) {
         }
       }
 
-      // 2. Trailing stop (optional): ratchets SL behind price once activated
+      // 2. Trailing stop
       if (!exitPrice && BT.USE_TRAILING_STOP && sig && sig.atr) {
         if (position.direction === 'LONG') {
           const triggerPrice = position.entry + slDist * BT.TSL_TRIGGER_RR;
@@ -225,8 +285,7 @@ function _walkForward(candles, pipSize) {
         }
       }
 
-      // 3. Signal reversal exit: the full multi-TF analysis now strongly favours
-      //    the opposite direction — bot acknowledges new evidence and closes.
+      // 3. Signal reversal exit
       if (!exitPrice && sig && Math.abs(sig.score) >= BT.REVERSAL_EXIT_SCORE) {
         const reversal =
           (position.direction === 'LONG'  && sig.recommendation.includes('SELL')) ||
@@ -237,7 +296,7 @@ function _walkForward(candles, pipSize) {
         }
       }
 
-      // 4. Soft safety cap: close if held too long regardless of signals
+      // 4. Soft safety cap
       if (!exitPrice && barsHeld >= BT.MAX_HOLD_DAYS) {
         exitPrice = next.open ?? next.rate;
         exitType  = 'TIME';
@@ -254,18 +313,46 @@ function _walkForward(candles, pipSize) {
         }
       }
 
+      // Scale-in: if SCALE_IN enabled and score is very strong, note it (not adding position in pip model)
+      if (BT.SCALE_IN && sig && !position.scaledIn &&
+          Math.abs(sig.score) >= BT.MIN_SCORE + 15) {
+        const sameDir = (position.direction === 'LONG'  && sig.recommendation.includes('BUY')) ||
+                        (position.direction === 'SHORT' && sig.recommendation.includes('SELL'));
+        if (sameDir) position.scaledIn = true; // mark for export context
+      }
+
       if (exitPrice !== null) {
-        const pips = position.direction === 'LONG'
+        // Compute final pips accounting for partial TP
+        let rawPips = position.direction === 'LONG'
           ? (exitPrice - position.entry) / pipSize
           : (position.entry - exitPrice) / pipSize;
-        trades.push({ ...position, exit: exitPrice, exitType, pips,
+
+        // Apply score weighting if enabled
+        const scoreWeight = BT.SCORE_WEIGHT_RISK
+          ? Math.min(1.5, 0.5 + Math.abs(position.score) / 80)
+          : 1.0;
+
+        let totalPips;
+        if (position.partialTpTriggered) {
+          const remPips = rawPips * position.remainingFrac;
+          totalPips = (position.partialTpPips + remPips) * scoreWeight;
+        } else {
+          totalPips = rawPips * scoreWeight;
+        }
+
+        trades.push({ ...position, exit: exitPrice, exitType, pips: totalPips,
                       exitBar: i + 1, exitTs: next.ts });
+
+        lastExitWasLoss = totalPips <= 0;
+        cooldownLeft    = lastExitWasLoss
+          ? Math.max(BT.RE_ENTRY_COOLDOWN, BT.RE_ENTRY_COOLDOWN + BT.LOSS_COOLDOWN)
+          : BT.RE_ENTRY_COOLDOWN;
         position = null;
       }
     }
 
     /* ── Generate signal & open position ──────────────── */
-    if (!position && sig && Math.abs(sig.score) >= BT.MIN_SCORE) {
+    if (!position && cooldownLeft <= 0 && sig && Math.abs(sig.score) >= BT.MIN_SCORE) {
       const direction = sig.recommendation.includes('BUY')  ? 'LONG'
                       : sig.recommendation.includes('SELL') ? 'SHORT'
                       : null;
@@ -280,7 +367,7 @@ function _walkForward(candles, pipSize) {
             (direction === 'LONG'  && entry >= sig.ema200) ||
             (direction === 'SHORT' && entry <= sig.ema200);
 
-          // Monthly macro filter: never trade counter to the monthly trend
+          // Monthly macro filter
           const monthlyOK = !BT.USE_TREND_FILTER || !sig.monthlyBias ||
             sig.monthlyBias === 'NEUTRAL' ||
             (direction === 'LONG'  && sig.monthlyBias === 'BULLISH') ||
@@ -308,13 +395,12 @@ function _walkForward(candles, pipSize) {
             (direction === 'LONG'  && sig.dailyMacdHist > 0) ||
             (direction === 'SHORT' && sig.dailyMacdHist < 0);
 
-          // Score consistency: require last N signals in the same direction
+          // Score consistency
           const consistN = Math.floor(BT.SCORE_CONSISTENCY) || 0;
           const consistencyOK = consistN <= 0 || recentScores.length < consistN ||
             recentScores.slice(-consistN).every(s => direction === 'LONG' ? s > 0 : s < 0);
 
-          // Volatility expansion: skip if today's candle range < 75% of 20-bar avg
-          // (market compressing / ranging → poor trend-follow environment)
+          // Volatility expansion filter
           let volatilityOK = true;
           if (BT.USE_VOLATILITY_FILTER) {
             const v0 = Math.max(0, i - 19);
@@ -330,13 +416,60 @@ function _walkForward(candles, pipSize) {
             }
           }
 
-          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK && consistencyOK && volatilityOK) {
+          // Multi-TF consensus: count how many of 5 TFs agree with direction
+          const biases = [sig.monthlyBias, sig.weeklyBias, sig.medBias, sig.shortBias, sig.recentBias];
+          const agreeingTFs = biases.filter(b =>
+            (direction === 'LONG'  && b === 'BULLISH') ||
+            (direction === 'SHORT' && b === 'BEARISH')
+          ).length;
+          const tfConsensusOK = !BT.MIN_TF_CONSENSUS || agreeingTFs >= BT.MIN_TF_CONSENSUS;
+
+          // Trend TF alignment: require weekly macro + daily + 4H all agree
+          const trendAlignOK = !BT.REQUIRE_TREND_ALIGN ||
+            biases.slice(0, 3).every(b =>
+              (direction === 'LONG'  && b === 'BULLISH') ||
+              (direction === 'SHORT' && b === 'BEARISH')
+            );
+
+          // EMA200 slope filter: EMA200 must trend in direction over last 20 bars
+          let emaSlopeOK = true;
+          if (BT.EMA_SLOPE_FILTER && ema200Hist.length >= 20 && sig.ema200 != null) {
+            const oldEma = ema200Hist[ema200Hist.length - 20];
+            if (oldEma != null) {
+              const slope = sig.ema200 - oldEma;
+              emaSlopeOK = (direction === 'LONG' && slope >= 0) ||
+                           (direction === 'SHORT' && slope <= 0);
+            }
+          }
+
+          // Candle confirmation: signal bar must close in trade direction
+          let candleConfirmOK = true;
+          if (BT.CANDLE_CONFIRM) {
+            const bar      = candles[i];
+            const barOpen  = bar.open ?? bar.rate;
+            const barClose = bar.rate;
+            candleConfirmOK = direction === 'LONG'
+              ? barClose >= barOpen
+              : barClose <= barOpen;
+          }
+
+          // Weekly macro strict: weekly macro bias must explicitly confirm (not just non-opposing)
+          const monthlyStrictOK = !BT.MONTHLY_STRICT ||
+            (direction === 'LONG'  && sig.monthlyBias === 'BULLISH') ||
+            (direction === 'SHORT' && sig.monthlyBias === 'BEARISH');
+
+          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK &&
+              consistencyOK && volatilityOK && tfConsensusOK && trendAlignOK &&
+              emaSlopeOK && candleConfirmOK && monthlyStrictOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
             position = {
-              direction, entry, sl, tp, entryBar: i + 1,
+              direction, entry, sl, tp, initSlDist: slDist, entryBar: i + 1,
               score: sig.score, recommendation: sig.recommendation, ts: next.ts,
               breakevenMoved: false,
+              partialTpTriggered: false, partialTpPips: 0,
+              remainingFrac: 1.0, partialTpFrac: 0,
+              scaledIn: false,
               // Full entry-signal context captured for export/analysis
               entryFactors:  sig.factors      || [],
               monthlyBias:   sig.monthlyBias,
@@ -356,11 +489,19 @@ function _walkForward(candles, pipSize) {
 
   /* Force-close open position at end of backtest window */
   if (position) {
-    const last = candles[candles.length - 1];
-    const pips = position.direction === 'LONG'
+    const last    = candles[candles.length - 1];
+    const rawPips = position.direction === 'LONG'
       ? (last.rate - position.entry) / pipSize
       : (position.entry - last.rate) / pipSize;
-    trades.push({ ...position, exit: last.rate, exitType: 'OPEN', pips,
+    const scoreWeight = BT.SCORE_WEIGHT_RISK
+      ? Math.min(1.5, 0.5 + Math.abs(position.score) / 80) : 1.0;
+    let totalPips;
+    if (position.partialTpTriggered) {
+      totalPips = (position.partialTpPips + rawPips * position.remainingFrac) * scoreWeight;
+    } else {
+      totalPips = rawPips * scoreWeight;
+    }
+    trades.push({ ...position, exit: last.rate, exitType: 'OPEN', pips: totalPips,
                   exitBar: candles.length - 1, exitTs: last.ts });
   }
 
@@ -393,8 +534,9 @@ function _btStats(trades) {
   const avgLoss      = losses.length ? grossLoss / losses.length : 0;
 
   /* Composite score 0–100 */
-  // Scale pip target with backtest window: ~1.5 pips/day is a solid target
-  const pipTarget = Math.max(200, Math.round(BT.BT_WINDOW_DAYS * 1.5));
+  // Scale pip target with backtest window: ~0.1 pips/1H bar is a solid target
+  // (~12 pips/day × 5 days = ~60 pips/week for the 1H timeframe)
+  const pipTarget = Math.max(50, Math.round(BT.BT_WINDOW_DAYS * 0.1));
   const wrPts  = Math.min(winRate / 0.60, 1) * 100 * 0.40;
   const pfPts  = Math.min(profitFactor / 2, 1) * 100 * 0.30;
   const pipPts = totalPips > 0 ? Math.min(totalPips / pipTarget, 1) * 100 * 0.30 : 0;
@@ -421,12 +563,12 @@ function _btStats(trades) {
 async function runBacktest(f, t) {
   _updateBTState(); // Sync global BT object with UI settings
   const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
-  // Fetch up to 2 years so EMA200 (200-bar warmup) is properly initialised,
+  // Fetch up to 2 years of 1H bars so indicator warmup is properly initialised,
   // but trades are only taken in the last BT.BT_WINDOW_DAYS bars.
-  const candles = await fetchYahooFinanceChart(f, t, '1D');
+  const candles = await fetchYahooFinanceChart(f, t, 'BT_1H');
 
   if (!candles || candles.length < BT.WARMUP + 10) {
-    return { error: `Need ≥ ${BT.WARMUP + 10} daily bars; got ${candles ? candles.length : 0}` };
+    return { error: `Need ≥ ${BT.WARMUP + 10} 1-hour bars; got ${candles ? candles.length : 0}` };
   }
 
   const btWindowStart = Math.max(BT.WARMUP, candles.length - BT.BT_WINDOW_DAYS);
@@ -517,11 +659,11 @@ function _buildBacktestResult(result, f, t) {
   const scoreLabel = _btScoreLabel(profitabilityScore);
   const curveSvg = _drawEquityCurve(equityCurve);
 
-  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
-                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
-                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
-                    : '~3mo';
-  const settingsDesc = `min score ${BT.MIN_SCORE} · ${windowLabel} window` +
+  const windowLabel = BT.BT_WINDOW_DAYS >= 3120 ? '~6mo'
+                    : BT.BT_WINDOW_DAYS >= 1560 ? '~3mo'
+                    : BT.BT_WINDOW_DAYS >= 520  ? '~1mo'
+                    :                             '~2wk';
+  const settingsDesc = `min score ${BT.MIN_SCORE} · ${windowLabel} window (1H)` +
     (BT.USE_TREND_FILTER      ? ' · trend filter'     : '') +
     (BT.REQUIRE_WEEKLY_ALIGN  ? ' · weekly req.'      : '') +
     (BT.REQUIRE_STRONG_SIGNAL ? ' · strong only'      : '') +
@@ -599,7 +741,7 @@ function _buildBacktestResult(result, f, t) {
       <div class="bt-metric"><span class="bt-m-lbl">Avg Win / Loss</span><span class="bt-m-val">${avgWin} / ${avgLoss}</span><span class="bt-m-sub">pips per trade</span></div>
     </div>
     <div class="bt-trade-chart-wrap">
-      <div class="bt-curve-label">Trade Chart — daily candles with entries &amp; exits</div>
+      <div class="bt-curve-label">Trade Chart — 1H candles with entries &amp; exits</div>
       <div class="bt-chart-legend">
         <span class="bt-leg bt-leg-entry-long">▲ Long entry</span>
         <span class="bt-leg bt-leg-entry-short">▼ Short entry</span>
@@ -616,13 +758,17 @@ function _buildBacktestResult(result, f, t) {
     ${recentTrades ? `<div class="bt-trades-wrap"><div class="bt-curve-label">Recent Trades</div><div class="bt-trades">${recentTrades}</div></div>` : ''}
     ${allTradesTable}
     <div class="bt-copy-row">
-      <button id="bt-copy-btn" class="bt-copy-btn" onclick="_copyBacktestExport()">
-        Copy Full Analysis Export
-      </button>
+      <div class="bt-copy-btns">
+        <button id="bt-copy-btn" class="bt-copy-btn" onclick="_copyBacktestExport()">
+          Copy Full Export
+        </button>
+        <button id="bt-ai-copy-btn" class="bt-copy-btn bt-copy-btn--ai" onclick="_copyAIOptimizationPrompt()">
+          Copy AI Optimization Prompt
+        </button>
+      </div>
       <span class="bt-copy-hint">
-        Copies all settings, statistics, per-trade signal context (5-TF biases, score breakdown,
-        RSI/ATR/EMA200 at entry) and surrounding OHLCV candles — paste into Claude for a
-        detailed strategy assessment.
+        <strong>Full Export</strong> — all settings, stats &amp; per-trade context; paste into Claude for strategy assessment.<br>
+        <strong>AI Optimization Prompt</strong> — sends your current setup + results to Claude with a request for an improved settings JSON you can paste back via the JSON Import panel above.
       </span>
     </div>
     <button class="bt-auto-btn" onclick="_launchAutoBacktest()">Test All Pairs</button>
@@ -680,12 +826,17 @@ function _buildAutoBacktestResult(result) {
     ${exclSection}
   </div>
   <div class="bt-copy-row bt-auto-copy-row">
-    <button id="bt-auto-copy-btn" class="bt-copy-btn" onclick="_copyAutoBacktestExport()">
-      Copy All Pairs Report
-    </button>
+    <div class="bt-copy-btns">
+      <button id="bt-auto-copy-btn" class="bt-copy-btn" onclick="_copyAutoBacktestExport()">
+        Copy All Pairs Report
+      </button>
+      <button id="bt-auto-ai-copy-btn" class="bt-copy-btn bt-copy-btn--ai" onclick="_copyAIAutoOptimizationPrompt()">
+        Copy AI Optimization Prompt
+      </button>
+    </div>
     <span class="bt-copy-hint">
-      Copies all pair scores, win rates, pips, and settings — paste into Claude
-      for a full strategy assessment and improvement suggestions.
+      <strong>All Pairs Report</strong> — all scores, win rates, pips &amp; settings; paste into Claude for strategy assessment.<br>
+      <strong>AI Optimization Prompt</strong> — sends the full multi-pair results to Claude with a request for an improved settings JSON you can paste back via the JSON Import panel.
     </span>
   </div>`;
 }
@@ -718,11 +869,36 @@ function _updateBTState() {
     BT.REVERSAL_EXIT_SCORE    = _getBTSavedSetting('reversal_exit_score',     BT_DEFAULTS.REVERSAL_EXIT_SCORE);
     BT.SCORE_CONSISTENCY      = _getBTSavedSetting('score_consistency',       BT_DEFAULTS.SCORE_CONSISTENCY);
     BT.USE_VOLATILITY_FILTER  = _getBTSavedSetting('use_volatility_filter',   BT_DEFAULTS.USE_VOLATILITY_FILTER);
+    // ── New settings ─────────────────────────────────────────
+    BT.PARTIAL_TP             = _getBTSavedSetting('partial_tp',             BT_DEFAULTS.PARTIAL_TP);
+    BT.PARTIAL_TP_RR          = _getBTSavedSetting('partial_tp_rr',          BT_DEFAULTS.PARTIAL_TP_RR);
+    BT.PARTIAL_TP_PCT         = _getBTSavedSetting('partial_tp_pct',         BT_DEFAULTS.PARTIAL_TP_PCT);
+    BT.RE_ENTRY_COOLDOWN      = _getBTSavedSetting('re_entry_cooldown',      BT_DEFAULTS.RE_ENTRY_COOLDOWN);
+    BT.LOSS_COOLDOWN          = _getBTSavedSetting('loss_cooldown',          BT_DEFAULTS.LOSS_COOLDOWN);
+    BT.MIN_TF_CONSENSUS       = _getBTSavedSetting('min_tf_consensus',       BT_DEFAULTS.MIN_TF_CONSENSUS);
+    BT.REQUIRE_TREND_ALIGN    = _getBTSavedSetting('require_trend_align',    BT_DEFAULTS.REQUIRE_TREND_ALIGN);
+    BT.EMA_SLOPE_FILTER       = _getBTSavedSetting('ema_slope_filter',       BT_DEFAULTS.EMA_SLOPE_FILTER);
+    BT.CANDLE_CONFIRM         = _getBTSavedSetting('candle_confirm',         BT_DEFAULTS.CANDLE_CONFIRM);
+    BT.MONTHLY_STRICT         = _getBTSavedSetting('monthly_strict',         BT_DEFAULTS.MONTHLY_STRICT);
+    BT.MOVE_SL_AT_PARTIAL     = _getBTSavedSetting('move_sl_at_partial',     BT_DEFAULTS.MOVE_SL_AT_PARTIAL);
+    BT.SCALE_IN               = _getBTSavedSetting('scale_in',               BT_DEFAULTS.SCALE_IN);
+    BT.SCORE_WEIGHT_RISK      = _getBTSavedSetting('score_weight_risk',      BT_DEFAULTS.SCORE_WEIGHT_RISK);
+
+    // ── Migrate old daily-scale settings to 1H scale ─────────────────────────
+    // If saved window_days is one of the old daily values (≤500 and not a valid
+    // 1H option), reset it to the 1H default so the backtest window is meaningful.
+    if (![240, 520, 1560, 3120].includes(BT.BT_WINDOW_DAYS)) {
+      BT.BT_WINDOW_DAYS = BT_DEFAULTS.BT_WINDOW_DAYS;
+    }
+    // If saved max_hold_days is below minimum valid 1H value, reset it.
+    if (BT.MAX_HOLD_DAYS < 24) {
+      BT.MAX_HOLD_DAYS = BT_DEFAULTS.MAX_HOLD_DAYS;
+    }
 }
 
 function _onBTSettingChange(key, val) {
     const el = document.getElementById(`bt-${key.replace(/_/g, '-')}-val`);
-    if (el) el.textContent = val;
+    if (el) el.textContent = key === 'partial_tp_pct' ? val + '%' : val;
     localStorage.setItem(`bt_${key}`, val);
     _updateBTState();
 }
@@ -769,38 +945,422 @@ function _clearExcludedPairs() {
   }
 }
 
+/* ── Apply settings from pasted JSON ────────────────────── */
+function _applySettingsFromJSON(jsonText) {
+  let parsed;
+  try { parsed = JSON.parse(jsonText); } catch (_) {
+    return { ok: false, msg: 'Invalid JSON — check for syntax errors and try again.' };
+  }
+
+  // Accept either full export format or bare settings object
+  const s = parsed.settings || parsed;
+
+  const keyMap = {
+    minConfidenceScore:         { lsKey: 'min_score',            type: 'number' },
+    atrStopLossMultiplier:      { lsKey: 'atr_sl',               type: 'number' },
+    riskRewardRatio:            { lsKey: 'rr',                   type: 'number' },
+    ema200TrendFilter:          { lsKey: 'use_trend_filter',      type: 'boolean' },
+    // Accept both old (requireWeeklyAlign) and new (requireDailyAlign) key names
+    requireDailyAlign:          { lsKey: 'require_weekly_align',  type: 'boolean' },
+    requireWeeklyAlign:         { lsKey: 'require_weekly_align',  type: 'boolean' },
+    requireStrongSignal:        { lsKey: 'require_strong_signal', type: 'boolean' },
+    rsiFilter:                  { lsKey: 'rsi_filter',            type: 'string' },
+    macdConfirmation:           { lsKey: 'macd_confirm',          type: 'boolean' },
+    breakevenTriggerRR:         { lsKey: 'breakeven_trigger_rr',  type: 'number' },
+    reversalExitScore:          { lsKey: 'reversal_exit_score',   type: 'number' },
+    // Accept both old (safetyCapDays) and new (safetyCapBars) key names
+    safetyCapBars:              { lsKey: 'max_hold_days',         type: 'number' },
+    safetyCapDays:              { lsKey: 'max_hold_days',         type: 'number' },
+    scoreConsistencyBars:       { lsKey: 'score_consistency',     type: 'number' },
+    volatilityFilter:           { lsKey: 'use_volatility_filter', type: 'boolean' },
+    reEntryCooldownBars:        { lsKey: 're_entry_cooldown',     type: 'number' },
+    lossCooldownBars:           { lsKey: 'loss_cooldown',         type: 'number' },
+    minTfConsensus:             { lsKey: 'min_tf_consensus',      type: 'number' },
+    requireTrendTimeframeAlign: { lsKey: 'require_trend_align',   type: 'boolean' },
+    emaSlopeFilter:             { lsKey: 'ema_slope_filter',      type: 'boolean' },
+    candleConfirmation:         { lsKey: 'candle_confirm',        type: 'boolean' },
+    // Accept both old (monthlyBiasStrict) and new (weeklyMacroStrict) key names
+    weeklyMacroStrict:          { lsKey: 'monthly_strict',        type: 'boolean' },
+    monthlyBiasStrict:          { lsKey: 'monthly_strict',        type: 'boolean' },
+    scaleIn:                    { lsKey: 'scale_in',              type: 'boolean' },
+    scoreWeightedRisk:          { lsKey: 'score_weight_risk',     type: 'boolean' },
+  };
+
+  let applied = 0;
+
+  // Handle backtest window (plain number, "1560 1h bars", or legacy "365 trading days")
+  const btWindowRaw = s.backtestWindow1HBars ?? s.backtestWindowDays ?? s.backtestWindow;
+  if (btWindowRaw != null) {
+    const num = parseInt(String(btWindowRaw), 10);
+    if (!isNaN(num)) { localStorage.setItem('bt_window_days', num); applied++; }
+  }
+
+  // Handle trailingStop (nested object or false)
+  if (s.trailingStop != null) {
+    if (s.trailingStop === false) {
+      localStorage.setItem('bt_use_trailing_stop', 'false');
+      applied++;
+    } else if (typeof s.trailingStop === 'object') {
+      localStorage.setItem('bt_use_trailing_stop', 'true');
+      if (s.trailingStop.factor    != null) { localStorage.setItem('bt_tsl_factor',      s.trailingStop.factor);    }
+      if (s.trailingStop.triggerRR != null) { localStorage.setItem('bt_tsl_trigger_rr',  s.trailingStop.triggerRR); }
+      applied++;
+    }
+  }
+
+  // Handle partialTakeProfit (nested object or false)
+  if (s.partialTakeProfit != null) {
+    if (s.partialTakeProfit === false) {
+      localStorage.setItem('bt_partial_tp', 'false');
+      applied++;
+    } else if (typeof s.partialTakeProfit === 'object') {
+      localStorage.setItem('bt_partial_tp', 'true');
+      if (s.partialTakeProfit.triggerRR      != null) { localStorage.setItem('bt_partial_tp_rr',      s.partialTakeProfit.triggerRR); }
+      if (s.partialTakeProfit.closePercent   != null) { localStorage.setItem('bt_partial_tp_pct',     s.partialTakeProfit.closePercent); }
+      if (s.partialTakeProfit.moveSLToBreakeven != null) { localStorage.setItem('bt_move_sl_at_partial', s.partialTakeProfit.moveSLToBreakeven); }
+      applied++;
+    }
+  }
+
+  // Flat key mappings
+  for (const [jsonKey, { lsKey, type }] of Object.entries(keyMap)) {
+    if (s[jsonKey] == null) continue;
+    const val = s[jsonKey];
+    if (type === 'boolean') { localStorage.setItem(`bt_${lsKey}`, String(Boolean(val))); }
+    else if (type === 'number') { localStorage.setItem(`bt_${lsKey}`, parseFloat(val)); }
+    else { localStorage.setItem(`bt_${lsKey}`, String(val)); }
+    applied++;
+  }
+
+  if (applied === 0) return { ok: false, msg: 'No recognisable settings found in JSON.' };
+
+  _updateBTState();
+  _syncSettingsUI(); // update all sliders/checkboxes/selects to reflect new values
+  return { ok: true, msg: `Applied ${applied} setting${applied !== 1 ? 's' : ''} successfully.` };
+}
+
+/* ── Sync UI controls to current BT state ───────────────── */
+function _syncSettingsUI() {
+  const setRange = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) { el.value = val; const lbl = document.getElementById(id + '-val'); if (lbl) lbl.textContent = val; }
+  };
+  const setCheck = (id, val) => { const el = document.getElementById(id); if (el) el.checked = Boolean(val); };
+  const setSelect = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+
+  setRange('bt-min-score',           BT.MIN_SCORE);
+  setRange('bt-atr-sl',              BT.ATR_SL);
+  setRange('bt-rr',                  BT.RR);
+  setCheck('bt-use-trend-filter',    BT.USE_TREND_FILTER);
+  setCheck('bt-use-trailing-stop',   BT.USE_TRAILING_STOP);
+  setRange('bt-tsl-trigger-rr',      BT.TSL_TRIGGER_RR);
+  setRange('bt-tsl-factor',          BT.TSL_FACTOR);
+  setSelect('bt-window-days',        BT.BT_WINDOW_DAYS);
+  setRange('bt-breakeven-trigger-rr', BT.BREAKEVEN_TRIGGER_RR);
+  setRange('bt-reversal-exit-score', BT.REVERSAL_EXIT_SCORE);
+  setRange('bt-max-hold-days',       BT.MAX_HOLD_DAYS);
+  setCheck('bt-require-weekly-align', BT.REQUIRE_WEEKLY_ALIGN);
+  setCheck('bt-require-strong-signal', BT.REQUIRE_STRONG_SIGNAL);
+  setSelect('bt-rsi-filter',         BT.RSI_FILTER);
+  setCheck('bt-macd-confirm',        BT.MACD_CONFIRM);
+  setRange('bt-score-consistency',   BT.SCORE_CONSISTENCY);
+  setCheck('bt-use-volatility-filter', BT.USE_VOLATILITY_FILTER);
+  // New settings
+  setCheck('bt-partial-tp',          BT.PARTIAL_TP);
+  setRange('bt-partial-tp-rr',       BT.PARTIAL_TP_RR);
+  setRange('bt-partial-tp-pct',      BT.PARTIAL_TP_PCT);
+  setCheck('bt-move-sl-at-partial',  BT.MOVE_SL_AT_PARTIAL);
+  setRange('bt-re-entry-cooldown',   BT.RE_ENTRY_COOLDOWN);
+  setRange('bt-loss-cooldown',       BT.LOSS_COOLDOWN);
+  setRange('bt-min-tf-consensus',    BT.MIN_TF_CONSENSUS);
+  setCheck('bt-require-trend-align', BT.REQUIRE_TREND_ALIGN);
+  setCheck('bt-ema-slope-filter',    BT.EMA_SLOPE_FILTER);
+  setCheck('bt-candle-confirm',      BT.CANDLE_CONFIRM);
+  setCheck('bt-monthly-strict',      BT.MONTHLY_STRICT);
+  setCheck('bt-scale-in',            BT.SCALE_IN);
+  setCheck('bt-score-weight-risk',   BT.SCORE_WEIGHT_RISK);
+
+  // Toggle TSL sub-rows visibility
+  const tslRows = document.querySelectorAll('.bt-tsl-subrow');
+  tslRows.forEach(r => { r.style.display = BT.USE_TRAILING_STOP ? '' : 'none'; });
+  // Toggle Partial TP sub-rows visibility
+  const ptpRows = document.querySelectorAll('.bt-ptp-subrow');
+  ptpRows.forEach(r => { r.style.display = BT.PARTIAL_TP ? '' : 'none'; });
+}
+
+/* ── AI Optimization Prompt helpers ─────────────────────── */
+function _buildSettingsJSON() {
+  return {
+    minConfidenceScore:         BT.MIN_SCORE,
+    atrStopLossMultiplier:      BT.ATR_SL,
+    riskRewardRatio:            BT.RR,
+    backtestWindow1HBars:       BT.BT_WINDOW_DAYS,
+    ema200TrendFilter:          BT.USE_TREND_FILTER,
+    requireDailyAlign:          BT.REQUIRE_WEEKLY_ALIGN,
+    requireStrongSignal:        BT.REQUIRE_STRONG_SIGNAL,
+    rsiFilter:                  BT.RSI_FILTER,
+    macdConfirmation:           BT.MACD_CONFIRM,
+    trailingStop:               BT.USE_TRAILING_STOP
+                                  ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR } : false,
+    breakevenTriggerRR:         BT.BREAKEVEN_TRIGGER_RR,
+    reversalExitScore:          BT.REVERSAL_EXIT_SCORE,
+    safetyCapBars:              BT.MAX_HOLD_DAYS,
+    scoreConsistencyBars:       BT.SCORE_CONSISTENCY,
+    volatilityFilter:           BT.USE_VOLATILITY_FILTER,
+    partialTakeProfit:          BT.PARTIAL_TP
+                                  ? { triggerRR: BT.PARTIAL_TP_RR, closePercent: BT.PARTIAL_TP_PCT, moveSLToBreakeven: BT.MOVE_SL_AT_PARTIAL } : false,
+    reEntryCooldownBars:        BT.RE_ENTRY_COOLDOWN,
+    lossCooldownBars:           BT.LOSS_COOLDOWN,
+    minTfConsensus:             BT.MIN_TF_CONSENSUS,
+    requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
+    emaSlopeFilter:             BT.EMA_SLOPE_FILTER,
+    candleConfirmation:         BT.CANDLE_CONFIRM,
+    weeklyMacroStrict:          BT.MONTHLY_STRICT,
+    scaleIn:                    BT.SCALE_IN,
+    scoreWeightedRisk:          BT.SCORE_WEIGHT_RISK,
+  };
+}
+
+async function _copyAIOptimizationPrompt() {
+  const result = window._lastBtResult;
+  if (!result) return;
+
+  const exportData = _buildExportData(result);
+  const settingsJSON = JSON.stringify(_buildSettingsJSON(), null, 2);
+  const statsJSON = JSON.stringify(exportData.statistics, null, 2);
+  const pairName = result.pair || 'this pair';
+
+  const prompt = `You are an expert forex trading strategy optimizer. I am backtesting a multi-timeframe confluence strategy on ${pairName} and want you to suggest improved settings.
+
+## Current Settings
+\`\`\`json
+${settingsJSON}
+\`\`\`
+
+## Backtest Results (${pairName})
+\`\`\`json
+${statsJSON}
+\`\`\`
+
+## Strategy Context
+- This is a 1-hour candle walk-forward backtest with a genuine 5-level multi-timeframe hierarchy (weekly macro → daily → 4H momentum → 2H momentum → 1H entry timing). Targets 1–5 trades per week.
+- Entry: confluence score must exceed minConfidenceScore, filtered by selected gates (1H EMA200, RSI on 4H, MACD, etc.).
+- Exit: intelligent — breakeven management, optional trailing stop, signal reversal detection, safety cap (in 1H bars).
+- "safetyCapBars" = max bars held (120 = 5 trading days). "partialTakeProfit" closes part of the position early.
+- "minTfConsensus" requires N of the 5 timeframes (weekly/daily/4H/2H/1H) to explicitly agree with direction.
+- "requireTrendTimeframeAlign" means weekly macro + daily + 4H must ALL point the same way.
+- "emaSlopeFilter" requires 1H EMA200 to be sloping in the trade direction (20-bar comparison).
+- "candleConfirmation" requires the signal bar to close in the trade direction.
+- "scoreWeightedRisk" scales pip weight by signal strength (stronger signal = 1.5× weight).
+
+## Your Task
+Analyse the results above and return an OPTIMISED settings JSON object that I can paste directly into my strategy importer.
+
+Guidelines for optimisation:
+- If win rate < 50%: tighten entry filters (raise minConfidenceScore, add MACD/candle confirm, increase minTfConsensus)
+- If profit factor < 1.5: adjust RR ratio, consider partial TP or trailing stop
+- If max drawdown is large relative to total pips: add re-entry cooldown, loss cooldown, or tighten volatility filter
+- If too few trades (<10 in the window): loosen some filters or lower minConfidenceScore
+- Balance between quality (win rate, profit factor) and quantity (trade count)
+
+Return ONLY the optimised JSON object (no extra text), in exactly this format so I can paste it directly:
+
+\`\`\`json
+{
+  "minConfidenceScore": ...,
+  "atrStopLossMultiplier": ...,
+  "riskRewardRatio": ...,
+  "backtestWindow1HBars": ...,
+  "ema200TrendFilter": ...,
+  "requireDailyAlign": ...,
+  "requireStrongSignal": ...,
+  "rsiFilter": "OFF|NORMAL|STRICT",
+  "macdConfirmation": ...,
+  "trailingStop": false | { "factor": ..., "triggerRR": ... },
+  "breakevenTriggerRR": ...,
+  "reversalExitScore": ...,
+  "safetyCapBars": ...,
+  "scoreConsistencyBars": ...,
+  "volatilityFilter": ...,
+  "partialTakeProfit": false | { "triggerRR": ..., "closePercent": ..., "moveSLToBreakeven": ... },
+  "reEntryCooldownBars": ...,
+  "lossCooldownBars": ...,
+  "minTfConsensus": ...,
+  "requireTrendTimeframeAlign": ...,
+  "emaSlopeFilter": ...,
+  "candleConfirmation": ...,
+  "weeklyMacroStrict": ...,
+  "scaleIn": ...,
+  "scoreWeightedRisk": ...
+}
+\`\`\`
+
+After the JSON, include a brief explanation (3-5 bullet points) of the key changes and the reasoning.`;
+
+  const btn = document.getElementById('bt-ai-copy-btn');
+  try {
+    await navigator.clipboard.writeText(prompt);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓ AI Prompt Copied!';
+      btn.classList.add('bt-copy-btn--done');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('bt-copy-btn--done'); }, 2800);
+    }
+  } catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = prompt; ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    if (btn) { btn.textContent = '✓ Copied (fallback)'; setTimeout(() => { btn.textContent = 'Copy AI Optimization Prompt'; }, 2500); }
+  }
+}
+
+async function _copyAIAutoOptimizationPrompt() {
+  const result = window._lastAutoResult;
+  if (!result) return;
+
+  const settingsJSON = JSON.stringify(_buildSettingsJSON(), null, 2);
+  const pairsData = result.pairs.map(p => ({
+    pair: p.pair,
+    score: p.profitabilityScore,
+    winRate: p.winRate + '%',
+    totalPips: +parseFloat(p.totalPips).toFixed(1),
+    profitFactor: p.profitFactor,
+    maxDrawdown: +parseFloat(p.maxDrawdownPips).toFixed(1),
+    trades: p.totalTrades,
+  }));
+
+  const prompt = `You are an expert forex trading strategy optimizer. I am backtesting a multi-timeframe confluence strategy across multiple currency pairs and need help optimising the settings.
+
+## Current Settings
+\`\`\`json
+${settingsJSON}
+\`\`\`
+
+## All-Pairs Backtest Results
+- Average Profitability Score: ${result.avgScore}
+- Average Win Rate: ${result.avgWinRate}%
+- Total Combined Pips: ${result.totalPips}
+
+\`\`\`json
+${JSON.stringify(pairsData, null, 2)}
+\`\`\`
+
+## Strategy Context
+- 1-hour candle walk-forward backtest with genuine 5-level multi-timeframe hierarchy (weekly macro → daily → 4H → 2H → 1H). Targets 1–5 trades per week.
+- Entry confluence score + filter gates. Exit: breakeven, trailing stop, reversal detection, safety cap (1H bars).
+- "safetyCapBars" = max bars held (120 = 5 trading days, 24 = 1 day).
+- "minTfConsensus" = how many of 5 TFs (weekly/daily/4H/2H/1H) must agree (0 = off, 3 = balanced, 5 = max).
+- "requireTrendTimeframeAlign" = weekly macro + daily + 4H must ALL point same direction.
+- "partialTakeProfit" = close a portion early to lock in gains while remainder runs to target.
+- "emaSlopeFilter" = 1H EMA200 must be sloping in trade direction.
+- "scoreWeightedRisk" = stronger signals get higher pip weight (up to 1.5×).
+
+## Your Task
+Analyse the multi-pair results and return ONE optimised settings JSON that works best ACROSS all pairs.
+
+Focus on:
+- Pairs with poor win rates or negative pips — what filters could fix them?
+- Pairs with great results — what's working that could be preserved?
+- Overall system robustness across different currency pairs
+
+Return ONLY the optimised JSON object (no extra text before it), in exactly this format:
+
+\`\`\`json
+{
+  "minConfidenceScore": ...,
+  "atrStopLossMultiplier": ...,
+  "riskRewardRatio": ...,
+  "backtestWindow1HBars": ...,
+  "ema200TrendFilter": ...,
+  "requireDailyAlign": ...,
+  "requireStrongSignal": ...,
+  "rsiFilter": "OFF|NORMAL|STRICT",
+  "macdConfirmation": ...,
+  "trailingStop": false | { "factor": ..., "triggerRR": ... },
+  "breakevenTriggerRR": ...,
+  "reversalExitScore": ...,
+  "safetyCapBars": ...,
+  "scoreConsistencyBars": ...,
+  "volatilityFilter": ...,
+  "partialTakeProfit": false | { "triggerRR": ..., "closePercent": ..., "moveSLToBreakeven": ... },
+  "reEntryCooldownBars": ...,
+  "lossCooldownBars": ...,
+  "minTfConsensus": ...,
+  "requireTrendTimeframeAlign": ...,
+  "emaSlopeFilter": ...,
+  "candleConfirmation": ...,
+  "weeklyMacroStrict": ...,
+  "scaleIn": ...,
+  "scoreWeightedRisk": ...
+}
+\`\`\`
+
+After the JSON, include a brief explanation (4-6 bullet points) covering the key changes, why they were made, and which pairs should benefit most.`;
+
+  const btn = document.getElementById('bt-auto-ai-copy-btn');
+  try {
+    await navigator.clipboard.writeText(prompt);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓ AI Prompt Copied!';
+      btn.classList.add('bt-copy-btn--done');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('bt-copy-btn--done'); }, 2800);
+    }
+  } catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = prompt; ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    if (btn) { btn.textContent = '✓ Copied (fallback)'; setTimeout(() => { btn.textContent = 'Copy AI Optimization Prompt'; }, 2500); }
+  }
+}
+
 /* ── Copy all-pairs export to clipboard ─────────────────── */
 async function _copyAutoBacktestExport() {
   const result = window._lastAutoResult;
   if (!result) return;
 
-  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
-                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
-                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
-                    : BT.BT_WINDOW_DAYS >= 55  ? '~3mo'
-                    :                            '~1mo';
+  const windowLabel = BT.BT_WINDOW_DAYS >= 3120 ? '~6mo'
+                    : BT.BT_WINDOW_DAYS >= 1560 ? '~3mo'
+                    : BT.BT_WINDOW_DAYS >= 520  ? '~1mo'
+                    :                             '~2wk';
 
   const data = {
-    _note: 'All-pairs backtest export — paste into Claude to get strategy analysis, improvement suggestions, and per-pair breakdown.',
+    _note: 'All-pairs 1H backtest export — paste into Claude to get strategy analysis, improvement suggestions, and per-pair breakdown.',
     exportTimestamp: new Date().toISOString(),
     settings: {
-      backtestWindow:        windowLabel + ' (' + BT.BT_WINDOW_DAYS + ' trading days)',
-      minConfidenceScore:    BT.MIN_SCORE,
-      atrStopLossMultiplier: BT.ATR_SL,
-      riskRewardRatio:       BT.RR,
-      ema200TrendFilter:     BT.USE_TREND_FILTER,
-      requireWeeklyAlign:    BT.REQUIRE_WEEKLY_ALIGN,
-      requireStrongSignal:   BT.REQUIRE_STRONG_SIGNAL,
-      rsiFilter:             BT.RSI_FILTER,
-      macdConfirmation:      BT.MACD_CONFIRM,
-      trailingStop:          BT.USE_TRAILING_STOP
-                               ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
-                               : false,
-      breakevenTriggerRR:    BT.BREAKEVEN_TRIGGER_RR,
-      reversalExitScore:     BT.REVERSAL_EXIT_SCORE,
-      safetyCapDays:         BT.MAX_HOLD_DAYS,
-      scoreConsistencyBars:  BT.SCORE_CONSISTENCY,
-      volatilityFilter:      BT.USE_VOLATILITY_FILTER,
+      backtestWindow:            windowLabel + ' (' + BT.BT_WINDOW_DAYS + ' 1h bars)',
+      minConfidenceScore:        BT.MIN_SCORE,
+      atrStopLossMultiplier:     BT.ATR_SL,
+      riskRewardRatio:           BT.RR,
+      ema200TrendFilter:         BT.USE_TREND_FILTER,
+      requireDailyAlign:         BT.REQUIRE_WEEKLY_ALIGN,
+      requireStrongSignal:       BT.REQUIRE_STRONG_SIGNAL,
+      rsiFilter:                 BT.RSI_FILTER,
+      macdConfirmation:          BT.MACD_CONFIRM,
+      trailingStop:              BT.USE_TRAILING_STOP
+                                   ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
+                                   : false,
+      breakevenTriggerRR:        BT.BREAKEVEN_TRIGGER_RR,
+      reversalExitScore:         BT.REVERSAL_EXIT_SCORE,
+      safetyCapBars:             BT.MAX_HOLD_DAYS,
+      scoreConsistencyBars:      BT.SCORE_CONSISTENCY,
+      volatilityFilter:          BT.USE_VOLATILITY_FILTER,
+      partialTakeProfit:         BT.PARTIAL_TP
+                                   ? { triggerRR: BT.PARTIAL_TP_RR, closePercent: BT.PARTIAL_TP_PCT, moveSLToBreakeven: BT.MOVE_SL_AT_PARTIAL }
+                                   : false,
+      reEntryCooldownBars:       BT.RE_ENTRY_COOLDOWN,
+      lossCooldownBars:          BT.LOSS_COOLDOWN,
+      minTfConsensus:            BT.MIN_TF_CONSENSUS,
+      requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
+      emaSlopeFilter:            BT.EMA_SLOPE_FILTER,
+      candleConfirmation:        BT.CANDLE_CONFIRM,
+      weeklyMacroStrict:         BT.MONTHLY_STRICT,
+      scaleIn:                   BT.SCALE_IN,
+      scoreWeightedRisk:         BT.SCORE_WEIGHT_RISK,
     },
     summary: {
       pairsTested:   result.pairs.length,
@@ -1000,7 +1560,7 @@ async function runOptimizer(progressCb) {
     if (progressCb) progressCb('fetch', pi, pairs.length, `${f}/${t}`);
     try {
       const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
-      const candles = await fetchYahooFinanceChart(f, t, '1D');
+      const candles = await fetchYahooFinanceChart(f, t, 'BT_1H');
       if (candles && candles.length >= BT.WARMUP + 20) {
         const sigs = _precomputeBtSignals(candles, pipSize);
         pairData.push({ candles, sigs, pipSize });
@@ -1417,12 +1977,12 @@ function _buildExportData(result) {
       signalAtEntry: {
         confidenceScore:    tr.score,
         recommendation:     tr.recommendation,
-        // 5-level TF hierarchy at moment of entry
-        monthlyMacroTrend:  tr.monthlyBias  || 'UNKNOWN',
-        weeklyTrend:        tr.weeklyBias   || 'UNKNOWN',
-        mediumTerm_60d:     tr.medBias      || 'UNKNOWN',
-        shortTerm_20d:      tr.shortBias    || 'UNKNOWN',
-        recentMomentum_10d: tr.recentBias   || 'UNKNOWN',
+        // Genuine 1H 5-level TF hierarchy at moment of entry
+        weeklyMacroTrend:   tr.monthlyBias  || 'UNKNOWN',
+        dailyTrend:         tr.weeklyBias   || 'UNKNOWN',
+        h4Momentum:         tr.medBias      || 'UNKNOWN',
+        h2Momentum:         tr.shortBias    || 'UNKNOWN',
+        h1EntryTiming:      tr.recentBias   || 'UNKNOWN',
         rsi:                tr.rsiAtEntry    != null ? +tr.rsiAtEntry.toFixed(1)    : null,
         atr:                tr.atrAtEntry    != null ? +tr.atrAtEntry.toFixed(pipDigits) : null,
         ema200:             tr.ema200AtEntry != null ? +tr.ema200AtEntry.toFixed(pipDigits) : null,
@@ -1439,26 +1999,40 @@ function _buildExportData(result) {
   });
 
   return {
-    _note: 'Paste this JSON into Claude to get a full strategy assessment, ' +
+    _note: 'Paste this JSON into Claude to get a full 1H-timeframe strategy assessment, ' +
            'improvement suggestions, and trade-by-trade analysis.',
     exportTimestamp: new Date().toISOString(),
     pair:            result.pair,
     settings: {
-      backtestWindow:       BT.BT_WINDOW_DAYS + ' trading days',
-      minConfidenceScore:   BT.MIN_SCORE,
-      atrStopLossMultiplier: BT.ATR_SL,
-      riskRewardRatio:      BT.RR,
-      ema200TrendFilter:    BT.USE_TREND_FILTER,
-      requireWeeklyAlign:   BT.REQUIRE_WEEKLY_ALIGN,
-      requireStrongSignal:  BT.REQUIRE_STRONG_SIGNAL,
-      rsiFilter:            BT.RSI_FILTER,
-      macdConfirmation:     BT.MACD_CONFIRM,
-      trailingStop:         BT.USE_TRAILING_STOP
-                              ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
-                              : false,
-      breakevenTriggerRR:   BT.BREAKEVEN_TRIGGER_RR,
-      reversalExitScore:    BT.REVERSAL_EXIT_SCORE,
-      safetyCapDays:        BT.MAX_HOLD_DAYS,
+      backtestWindow:            BT.BT_WINDOW_DAYS + ' 1h bars',
+      minConfidenceScore:        BT.MIN_SCORE,
+      atrStopLossMultiplier:     BT.ATR_SL,
+      riskRewardRatio:           BT.RR,
+      ema200TrendFilter:         BT.USE_TREND_FILTER,
+      requireDailyAlign:         BT.REQUIRE_WEEKLY_ALIGN,
+      requireStrongSignal:       BT.REQUIRE_STRONG_SIGNAL,
+      rsiFilter:                 BT.RSI_FILTER,
+      macdConfirmation:          BT.MACD_CONFIRM,
+      trailingStop:              BT.USE_TRAILING_STOP
+                                   ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR }
+                                   : false,
+      breakevenTriggerRR:        BT.BREAKEVEN_TRIGGER_RR,
+      reversalExitScore:         BT.REVERSAL_EXIT_SCORE,
+      safetyCapBars:             BT.MAX_HOLD_DAYS,
+      scoreConsistencyBars:      BT.SCORE_CONSISTENCY,
+      volatilityFilter:          BT.USE_VOLATILITY_FILTER,
+      partialTakeProfit:         BT.PARTIAL_TP
+                                   ? { triggerRR: BT.PARTIAL_TP_RR, closePercent: BT.PARTIAL_TP_PCT, moveSLToBreakeven: BT.MOVE_SL_AT_PARTIAL }
+                                   : false,
+      reEntryCooldownBars:       BT.RE_ENTRY_COOLDOWN,
+      lossCooldownBars:          BT.LOSS_COOLDOWN,
+      minTfConsensus:            BT.MIN_TF_CONSENSUS,
+      requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
+      emaSlopeFilter:            BT.EMA_SLOPE_FILTER,
+      candleConfirmation:        BT.CANDLE_CONFIRM,
+      weeklyMacroStrict:         BT.MONTHLY_STRICT,
+      scaleIn:                   BT.SCALE_IN,
+      scoreWeightedRisk:         BT.SCORE_WEIGHT_RISK,
     },
     statistics: {
       totalTrades:        result.totalTrades,
@@ -1527,7 +2101,7 @@ function appendBacktestSection(panel, f, t) {
       </div>
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-atr-sl">ATR Stop-Loss Multiplier
-          <span class="bt-setting-hint">Wider stop to survive daily volatility</span>
+          <span class="bt-setting-hint">Stop-loss distance = 1H ATR × this multiplier</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="range" id="bt-atr-sl" min="1.0" max="5.0" value="${BT.ATR_SL}" step="0.5" oninput="_onBTSettingChange('atr_sl', this.value)">
@@ -1559,7 +2133,7 @@ function appendBacktestSection(panel, f, t) {
               <input type="checkbox" id="bt-use-trailing-stop" ${BT.USE_TRAILING_STOP ? 'checked' : ''} onchange="_onBTSettingChange('use_trailing_stop', this.checked)">
           </div>
       </div>
-       <div class="bt-setting-row" ${!BT.USE_TRAILING_STOP ? 'style="display: none;"' : ''}>
+      <div class="bt-setting-row bt-tsl-subrow" ${!BT.USE_TRAILING_STOP ? 'style="display:none"' : ''}>
         <label class="bt-setting-label" for="bt-tsl-trigger-rr">TSL Trigger R:R
           <span class="bt-setting-hint">R:R multiple to activate trailing stop</span>
         </label>
@@ -1568,7 +2142,7 @@ function appendBacktestSection(panel, f, t) {
           <span id="bt-tsl-trigger-rr-val" class="bt-range-val">${BT.TSL_TRIGGER_RR}</span>
         </div>
       </div>
-       <div class="bt-setting-row" ${!BT.USE_TRAILING_STOP ? 'style="display: none;"' : ''}>
+      <div class="bt-setting-row bt-tsl-subrow" ${!BT.USE_TRAILING_STOP ? 'style="display:none"' : ''}>
         <label class="bt-setting-label" for="bt-tsl-factor">TSL ATR Factor
           <span class="bt-setting-hint">How far trailing stop follows price</span>
         </label>
@@ -1582,15 +2156,14 @@ function appendBacktestSection(panel, f, t) {
 
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-window-days">Backtest Period
-          <span class="bt-setting-hint">How many recent trading days to simulate (uses up to 5yr of history)</span>
+          <span class="bt-setting-hint">How many 1H bars to simulate (~120 bars = 1 week; uses up to 2yr of hourly history)</span>
         </label>
         <div class="bt-setting-ctrl">
           <select id="bt-window-days" class="bt-select" onchange="_onBTSettingChange('window_days', this.value)">
-            <option value="30"  ${BT.BT_WINDOW_DAYS === 30  ? 'selected' : ''}>1 month (~30 days)</option>
-            <option value="66"  ${BT.BT_WINDOW_DAYS === 66  ? 'selected' : ''}>3 months (~66 days)</option>
-            <option value="130" ${BT.BT_WINDOW_DAYS === 130 ? 'selected' : ''}>6 months (~130 days)</option>
-            <option value="365" ${BT.BT_WINDOW_DAYS === 365 ? 'selected' : ''}>1 year (~365 days)</option>
-            <option value="500" ${BT.BT_WINDOW_DAYS === 500 ? 'selected' : ''}>2 years (~500 days)</option>
+            <option value="240"  ${BT.BT_WINDOW_DAYS === 240  ? 'selected' : ''}>2 weeks (~240 bars)</option>
+            <option value="520"  ${BT.BT_WINDOW_DAYS === 520  ? 'selected' : ''}>1 month (~520 bars)</option>
+            <option value="1560" ${BT.BT_WINDOW_DAYS === 1560 ? 'selected' : ''}>3 months (~1560 bars)</option>
+            <option value="3120" ${BT.BT_WINDOW_DAYS === 3120 ? 'selected' : ''}>6 months (~3120 bars)</option>
           </select>
         </div>
       </div>
@@ -1613,11 +2186,11 @@ function appendBacktestSection(panel, f, t) {
         </div>
       </div>
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-max-hold-days">Safety Cap (days)
-          <span class="bt-setting-hint">Last-resort close if the bot hasn't exited by signal, SL, TP, or breakeven after this many bars</span>
+        <label class="bt-setting-label" for="bt-max-hold-days">Safety Cap (1H bars)
+          <span class="bt-setting-hint">Last-resort close if no signal/SL/TP exit after this many 1H bars (24 = 1 day, 120 = 5 days)</span>
         </label>
         <div class="bt-setting-ctrl">
-          <input type="range" id="bt-max-hold-days" min="7" max="120" value="${BT.MAX_HOLD_DAYS}" step="7" oninput="_onBTSettingChange('max_hold_days', this.value)">
+          <input type="range" id="bt-max-hold-days" min="24" max="240" value="${BT.MAX_HOLD_DAYS}" step="24" oninput="_onBTSettingChange('max_hold_days', this.value)">
           <span id="bt-max-hold-days-val" class="bt-range-val">${BT.MAX_HOLD_DAYS}</span>
         </div>
       </div>
@@ -1625,8 +2198,8 @@ function appendBacktestSection(panel, f, t) {
       <div class="bt-setting-divider">Advanced Entry Filters</div>
 
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-require-weekly-align">Require Weekly Alignment
-          <span class="bt-setting-hint">Block trades when weekly trend is unclear (NEUTRAL)</span>
+        <label class="bt-setting-label" for="bt-require-weekly-align">Require Daily Alignment
+          <span class="bt-setting-hint">Block trades when the daily-context trend is unclear (NEUTRAL)</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="checkbox" id="bt-require-weekly-align" ${BT.REQUIRE_WEEKLY_ALIGN ? 'checked' : ''} onchange="_onBTSettingChange('require_weekly_align', this.checked)">
@@ -1680,6 +2253,143 @@ function appendBacktestSection(panel, f, t) {
           <input type="checkbox" id="bt-use-volatility-filter" ${BT.USE_VOLATILITY_FILTER ? 'checked' : ''} onchange="_onBTSettingChange('use_volatility_filter', this.checked)">
         </div>
       </div>
+
+      <div class="bt-setting-divider">Multi-Timeframe Consensus Filters</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-min-tf-consensus">Min TF Consensus
+          <span class="bt-setting-hint">Require at least N of the 5 timeframes (weekly/daily/4H/2H/1H) to explicitly agree with direction. 0 = off, 3 = balanced quality gate, 5 = maximum confluence.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-min-tf-consensus" min="0" max="5" value="${BT.MIN_TF_CONSENSUS}" step="1" oninput="_onBTSettingChange('min_tf_consensus', this.value)">
+          <span id="bt-min-tf-consensus-val" class="bt-range-val">${BT.MIN_TF_CONSENSUS}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-require-trend-align">Require Trend TF Alignment
+          <span class="bt-setting-hint">Weekly macro + daily + 4H must ALL point in the same direction — the strongest trend confluence gate available.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-require-trend-align" ${BT.REQUIRE_TREND_ALIGN ? 'checked' : ''} onchange="_onBTSettingChange('require_trend_align', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-monthly-strict">Weekly Macro Strict
+          <span class="bt-setting-hint">Weekly macro context must explicitly confirm direction (BULLISH for longs, BEARISH for shorts) — stricter than the default which merely blocks opposing signals.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-monthly-strict" ${BT.MONTHLY_STRICT ? 'checked' : ''} onchange="_onBTSettingChange('monthly_strict', this.checked)">
+        </div>
+      </div>
+
+      <div class="bt-setting-divider">Advanced Entry Confirmation</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-ema-slope-filter">EMA200 Slope Filter
+          <span class="bt-setting-hint">EMA200 must be sloping in the trade direction over the last 20 bars — ensures you trade WITH a moving trend, not a flat or reversing one.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-ema-slope-filter" ${BT.EMA_SLOPE_FILTER ? 'checked' : ''} onchange="_onBTSettingChange('ema_slope_filter', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-candle-confirm">Candle Confirmation
+          <span class="bt-setting-hint">Signal bar must close in the trade direction (bullish candle for longs, bearish for shorts) — adds a price-action gate that reduces false breakout entries.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-candle-confirm" ${BT.CANDLE_CONFIRM ? 'checked' : ''} onchange="_onBTSettingChange('candle_confirm', this.checked)">
+        </div>
+      </div>
+
+      <div class="bt-setting-divider">Partial Take-Profit &amp; Scale-In</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-partial-tp">Partial Take-Profit
+          <span class="bt-setting-hint">Close a portion of the position at an early R:R target to lock in gains — the remainder continues to the full TP.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-partial-tp" ${BT.PARTIAL_TP ? 'checked' : ''} onchange="_onBTSettingChange('partial_tp', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row bt-ptp-subrow" ${!BT.PARTIAL_TP ? 'style="display:none"' : ''}>
+        <label class="bt-setting-label" for="bt-partial-tp-rr">Partial TP Trigger (×R)
+          <span class="bt-setting-hint">R:R multiple at which partial profit is taken</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-partial-tp-rr" min="0.5" max="2.0" value="${BT.PARTIAL_TP_RR}" step="0.1" oninput="_onBTSettingChange('partial_tp_rr', this.value)">
+          <span id="bt-partial-tp-rr-val" class="bt-range-val">${BT.PARTIAL_TP_RR}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row bt-ptp-subrow" ${!BT.PARTIAL_TP ? 'style="display:none"' : ''}>
+        <label class="bt-setting-label" for="bt-partial-tp-pct">Partial TP Close %
+          <span class="bt-setting-hint">Percentage of position to close at partial TP (remainder rides to full TP)</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-partial-tp-pct" min="25" max="75" value="${BT.PARTIAL_TP_PCT}" step="5" oninput="_onBTSettingChange('partial_tp_pct', this.value)">
+          <span id="bt-partial-tp-pct-val" class="bt-range-val">${BT.PARTIAL_TP_PCT}%</span>
+        </div>
+      </div>
+      <div class="bt-setting-row bt-ptp-subrow" ${!BT.PARTIAL_TP ? 'style="display:none"' : ''}>
+        <label class="bt-setting-label" for="bt-move-sl-at-partial">Move SL to Breakeven on Partial TP
+          <span class="bt-setting-hint">After taking partial profit, automatically move stop-loss to entry price to protect remaining position</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-move-sl-at-partial" ${BT.MOVE_SL_AT_PARTIAL ? 'checked' : ''} onchange="_onBTSettingChange('move_sl_at_partial', this.checked)">
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-scale-in">Scale-In on Strengthening Signal
+          <span class="bt-setting-hint">Mark trades where the signal strengthened ≥15pts above threshold while in position — useful for identifying scale-in opportunities in post-analysis.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-scale-in" ${BT.SCALE_IN ? 'checked' : ''} onchange="_onBTSettingChange('scale_in', this.checked)">
+        </div>
+      </div>
+
+      <div class="bt-setting-divider">Re-Entry Cooldown &amp; Risk Weighting</div>
+
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-re-entry-cooldown">Re-Entry Cooldown (bars)
+          <span class="bt-setting-hint">Minimum bars to wait between any exit and the next entry — prevents immediately re-entering choppy counter-trend conditions. 0 = off.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-re-entry-cooldown" min="0" max="10" value="${BT.RE_ENTRY_COOLDOWN}" step="1" oninput="_onBTSettingChange('re_entry_cooldown', this.value)">
+          <span id="bt-re-entry-cooldown-val" class="bt-range-val">${BT.RE_ENTRY_COOLDOWN}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-loss-cooldown">Extra Loss Cooldown (bars)
+          <span class="bt-setting-hint">Additional bars to wait specifically after a losing trade — gives the market time to stabilise before risking capital again. Stacks on top of Re-Entry Cooldown.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-loss-cooldown" min="0" max="10" value="${BT.LOSS_COOLDOWN}" step="1" oninput="_onBTSettingChange('loss_cooldown', this.value)">
+          <span id="bt-loss-cooldown-val" class="bt-range-val">${BT.LOSS_COOLDOWN}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-score-weight-risk">Score-Weighted Risk
+          <span class="bt-setting-hint">Scale pip weight by signal strength — a max-confidence signal earns up to 1.5× pip credit, a minimum-confidence signal earns 0.5×. Rewards selectivity in results.</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="checkbox" id="bt-score-weight-risk" ${BT.SCORE_WEIGHT_RISK ? 'checked' : ''} onchange="_onBTSettingChange('score_weight_risk', this.checked)">
+        </div>
+      </div>
+    </div>
+
+    <div class="bt-json-import">
+      <button class="bt-json-toggle" onclick="_toggleJsonImport(this)">
+        ▸ Import Settings JSON
+      </button>
+      <div class="bt-json-body" style="display:none">
+        <p class="bt-json-desc">
+          Paste a settings JSON here (from the <em>Copy AI Optimization Prompt</em> response, or any previous export) to instantly apply all settings. Accepts the full export format or a bare settings object.
+        </p>
+        <textarea id="bt-json-input" class="bt-json-textarea" placeholder='{"minConfidenceScore": 55, "riskRewardRatio": 2.5, ...}'></textarea>
+        <div class="bt-json-actions">
+          <button class="bt-json-apply-btn" onclick="_applyJSONFromUI()">Apply Settings</button>
+          <span id="bt-json-status" class="bt-json-status"></span>
+        </div>
+      </div>
     </div>
     <div class="bt-intro">
       Fully automated walk-forward simulation on up to 5 years of real daily candles.
@@ -1701,12 +2411,36 @@ function appendBacktestSection(panel, f, t) {
 
   // Show/hide TSL settings based on checkbox
   const tslCheckbox = section.querySelector('#bt-use-trailing-stop');
-  const tslRows = section.querySelectorAll('.bt-setting-row[style*="display"]');
   tslCheckbox.addEventListener('change', (e) => {
-    tslRows.forEach(row => {
-        row.style.display = e.target.checked ? '' : 'none';
+    section.querySelectorAll('.bt-tsl-subrow').forEach(r => {
+      r.style.display = e.target.checked ? '' : 'none';
     });
   });
+
+  // Show/hide Partial TP settings based on checkbox
+  const ptpCheckbox = section.querySelector('#bt-partial-tp');
+  ptpCheckbox.addEventListener('change', (e) => {
+    section.querySelectorAll('.bt-ptp-subrow').forEach(r => {
+      r.style.display = e.target.checked ? '' : 'none';
+    });
+  });
+}
+
+function _toggleJsonImport(btn) {
+  const body = btn.nextElementSibling;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  btn.textContent = (open ? '▾' : '▸') + ' Import Settings JSON';
+}
+
+function _applyJSONFromUI() {
+  const ta     = document.getElementById('bt-json-input');
+  const status = document.getElementById('bt-json-status');
+  if (!ta || !status) return;
+  const r = _applySettingsFromJSON(ta.value.trim());
+  status.textContent = r.msg;
+  status.className   = 'bt-json-status ' + (r.ok ? 'bt-json-status--ok' : 'bt-json-status--err');
+  if (r.ok) ta.value = '';
 }
 
 window.runBacktest             = runBacktest;
@@ -1723,6 +2457,12 @@ window._renderBtTradeChart     = _renderBtTradeChart;
 window._copyBacktestExport     = _copyBacktestExport;
 window._copyAutoBacktestExport = _copyAutoBacktestExport;
 window._buildExportData        = _buildExportData;
-window._getExcludedPairs       = _getExcludedPairs;
-window._toggleExcludedPair     = _toggleExcludedPair;
-window._clearExcludedPairs     = _clearExcludedPairs;
+window._getExcludedPairs             = _getExcludedPairs;
+window._toggleExcludedPair           = _toggleExcludedPair;
+window._clearExcludedPairs           = _clearExcludedPairs;
+window._applySettingsFromJSON        = _applySettingsFromJSON;
+window._applyJSONFromUI              = _applyJSONFromUI;
+window._toggleJsonImport             = _toggleJsonImport;
+window._copyAIOptimizationPrompt     = _copyAIOptimizationPrompt;
+window._copyAIAutoOptimizationPrompt = _copyAIAutoOptimizationPrompt;
+window._syncSettingsUI               = _syncSettingsUI;

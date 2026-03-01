@@ -1134,3 +1134,64 @@ input  { font-family: inherit; }
 .bt-leg-reversal    { color: #F0B72F; }
 .bt-leg-sl-line     { color: rgba(248,81,73,0.85); }
 .bt-leg-tp-line     { color: rgba(63,185,80,0.85); }
+
+/* ── Copy-button row — multiple buttons ──────────────────── */
+.bt-copy-btns {
+  display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+}
+.bt-copy-btn--ai {
+  background: #1a4a2e; border-color: #2ea043;
+}
+.bt-copy-btn--ai:hover  { background: #238636; border-color: #3fb950; }
+.bt-copy-btn--ai:active { transform: scale(0.97); }
+
+/* ── JSON Import Panel ───────────────────────────────────── */
+.bt-json-import {
+  margin: 12px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.bt-json-toggle {
+  display: block; width: 100%;
+  background: var(--bg2); border: none; color: var(--txt2);
+  padding: 8px 12px; font-size: 12px; font-weight: 600;
+  text-align: left; cursor: pointer;
+  transition: background var(--ease), color var(--ease);
+}
+.bt-json-toggle:hover { background: var(--bg3); color: var(--txt1); }
+.bt-json-body {
+  padding: 10px 12px 12px;
+  background: var(--bg1);
+  border-top: 1px solid var(--border);
+}
+.bt-json-desc {
+  font-size: 11px; color: var(--txt3); line-height: 1.5;
+  margin-bottom: 8px;
+}
+.bt-json-textarea {
+  width: 100%; min-height: 90px; max-height: 220px;
+  background: var(--bg0); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--txt1);
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  font-size: 11px; line-height: 1.5;
+  padding: 8px 10px; resize: vertical; outline: none;
+  transition: border-color var(--ease);
+}
+.bt-json-textarea:focus { border-color: var(--blue); }
+.bt-json-actions {
+  display: flex; align-items: center; gap: 10px; margin-top: 8px;
+}
+.bt-json-apply-btn {
+  background: #1f6feb; border: 1px solid #388bfd; color: #fff;
+  padding: 6px 14px; border-radius: var(--r-sm);
+  font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  transition: background var(--ease);
+}
+.bt-json-apply-btn:hover  { background: #388bfd; }
+.bt-json-apply-btn:active { transform: scale(0.97); }
+.bt-json-status {
+  font-size: 11px; font-weight: 600; line-height: 1.4;
+}
+.bt-json-status--ok  { color: var(--green); }
+.bt-json-status--err { color: var(--red); }
