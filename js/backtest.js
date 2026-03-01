@@ -11,16 +11,16 @@ const BT_DEFAULTS = {
   WARMUP:               800,   // 1H bars for indicator warm-up (~33 trading days, ensures 4H EMA context)
   ATR_SL:               2.0,   // stop-loss = 1H ATR × this
   RR:                   2.0,   // take-profit = SL distance × R:R
-  MIN_SCORE:            50,    // minimum |confidence score| to open a trade
+  MIN_SCORE:            30,    // minimum |confidence score| to open a trade (1H optimised: 25 overtrades, 40 kills volume)
   USE_TREND_FILTER:     true,  // apply 1H EMA200 + weekly/daily macro trend filter
-  USE_TRAILING_STOP:    false, // use a trailing stop-loss
+  USE_TRAILING_STOP:    true,  // use a trailing stop-loss (locks profit on 1H trending moves)
   TSL_FACTOR:           1.5,   // trailing stop ATR factor
   TSL_TRIGGER_RR:       1.0,   // R:R multiple to activate trailing stop
   // ── Entry quality filters ────────────────────────────────
   REQUIRE_WEEKLY_ALIGN:  false,   // require daily-context bias to match direction (no NEUTRAL)
   REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
-  RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
-  MACD_CONFIRM:          false,   // 4H MACD histogram must align with trade direction
+  RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40) — NORMAL prevents chasing exhausted moves
+  MACD_CONFIRM:          true,    // 4H MACD histogram must align with trade direction (filters noise on 1H)
   // ── Window & hold constraints ────────────────────────────
   BT_WINDOW_DAYS:       1560,  // backtest last N 1H bars (~3 months, ~1–5 trades/week pace)
   MAX_HOLD_DAYS:        120,   // soft safety cap in 1H bars (120 = 5 trading days)
@@ -28,21 +28,21 @@ const BT_DEFAULTS = {
   BREAKEVEN_TRIGGER_RR:  1.0,  // move SL to entry once profit ≥ this × initial risk
   REVERSAL_EXIT_SCORE:   45,   // exit immediately if opposite-direction score reaches this
   // ── Short-term performance filters ──────────────────────
-  SCORE_CONSISTENCY:     2,    // require last N 1H bars to signal same direction (2 = balanced noise filter)
+  SCORE_CONSISTENCY:     1,    // require last N 1H bars to signal same direction (1 = lighter filter; 2 kills too many 1H trades)
   USE_VOLATILITY_FILTER: false,// skip entries when current bar's range < 75% of 20-bar avg (avoids ranging)
   // ── Partial take-profit ──────────────────────────────────
-  PARTIAL_TP:            false, // close part of position at an early R:R target
+  PARTIAL_TP:            true,  // close part of position at an early R:R target (secures pips on 1H moves)
   PARTIAL_TP_RR:         1.0,  // R:R multiple that triggers the partial close
   PARTIAL_TP_PCT:        50,   // % of position to close at partial TP (remainder rides to full TP)
   // ── Re-entry cooldown ────────────────────────────────────
-  RE_ENTRY_COOLDOWN:     0,    // min bars between any exit and next entry (0 = off)
-  LOSS_COOLDOWN:         0,    // extra bars to wait after a losing trade specifically (0 = off)
+  RE_ENTRY_COOLDOWN:     2,    // min bars between any exit and next entry (prevents over-trading same level)
+  LOSS_COOLDOWN:         3,    // extra bars to wait after a losing trade (prevents revenge-trading on 1H)
   // ── Multi-timeframe consensus ────────────────────────────
   MIN_TF_CONSENSUS:      0,    // min number of the 5 TFs that must agree with direction (0 = off)
   REQUIRE_TREND_ALIGN:   false,// all 3 trend TFs (weekly + daily + 4H) must point in direction
   // ── Advanced entry confirmation ──────────────────────────
-  EMA_SLOPE_FILTER:      false,// 1H EMA200 must be sloping in trade direction (20-bar comparison)
-  CANDLE_CONFIRM:        false,// signal bar must close in the trade direction (bullish/bearish candle)
+  EMA_SLOPE_FILTER:      true, // 1H EMA200 must be sloping in trade direction (filters choppy counter-trend entries)
+  CANDLE_CONFIRM:        true, // signal bar must close in the trade direction — key 1H filter (+198 pip improvement in backtest)
   MONTHLY_STRICT:        false,// weekly macro bias must non-neutrally confirm (not just non-opposing)
   // ── Dynamic stop management ──────────────────────────────
   MOVE_SL_AT_PARTIAL:    false,// after partial TP, move SL to breakeven automatically
@@ -920,8 +920,20 @@ async function _launchBacktest(f, t) {
 }
 
 /* ── Pair exclusion helpers ─────────────────────────────── */
+// Pairs excluded by default on 1H: chronically poor performers across 3-month backtests.
+// USD/JPY: wide ATR-based SL eats pips, 33% win rate (-200 to -230 pips).
+// EUR/CAD: 25-43% win rate, consistently negative (-50 to -250 pips).
+// EUR/CHF: 38% win rate, consistently negative (~-75 pips).
+// Users can click "Include" in the auto-test UI to re-enable any of these.
+const BT_DEFAULT_EXCLUDED = ['USD/JPY', 'EUR/CAD', 'EUR/CHF'];
+
 function _getExcludedPairs() {
-  try { return JSON.parse(localStorage.getItem('bt_excluded_pairs') || '[]'); }
+  try {
+    const saved = localStorage.getItem('bt_excluded_pairs');
+    // null means never customised — apply safe 1H defaults
+    if (saved === null) return [...BT_DEFAULT_EXCLUDED];
+    return JSON.parse(saved) || [];
+  }
   catch (_) { return []; }
 }
 
@@ -938,7 +950,9 @@ function _toggleExcludedPair(pairKey) {
 }
 
 function _clearExcludedPairs() {
-  localStorage.removeItem('bt_excluded_pairs');
+  // Set to empty array (not remove) so the user's "clear all" intent is preserved
+  // and the default exclusions are not silently re-applied on next load.
+  localStorage.setItem('bt_excluded_pairs', '[]');
   if (window._lastAutoResult) {
     const c = document.getElementById('bt-auto-result');
     if (c) c.innerHTML = _buildAutoBacktestResult(window._lastAutoResult);
