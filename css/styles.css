@@ -1033,3 +1033,34 @@ input  { font-family: inherit; }
   border-radius: var(--r-sm); color: var(--green);
   padding: 6px 10px; margin: 6px; font-size: 12px; font-weight: 600;
 }
+
+/* ── Backtest trade chart ─────────────────────────────────── */
+.bt-trade-chart-wrap {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px 4px;
+  margin: 10px 0;
+}
+.bt-trade-chart {
+  width: 100%;
+  height: 240px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+/* Legend row below the chart title */
+.bt-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 4px 0 6px;
+  font-size: 10px;
+}
+.bt-leg { display: flex; align-items: center; gap: 3px; }
+.bt-leg-entry-long  { color: #F0B72F; }
+.bt-leg-entry-short { color: #F0B72F; }
+.bt-leg-sl          { color: #F85149; }
+.bt-leg-tp          { color: #3FB950; }
+.bt-leg-time        { color: #A371F7; }
+.bt-leg-sl-line     { color: rgba(248,81,73,0.85); }
+.bt-leg-tp-line     { color: rgba(63,185,80,0.85); }
