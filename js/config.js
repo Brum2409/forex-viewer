@@ -53,7 +53,7 @@ const INTERVAL_CONFIG = {
   "1h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 60    },
   "2h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 120   },
   "4h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 240   },
-  "1D":  { yfInterval: "1d",  yfRange: "2y",   groupMins: 1440  },
+  "1D":  { yfInterval: "1d",  yfRange: "5y",   groupMins: 1440  },
   "1W":  { yfInterval: "1wk", yfRange: "10y",  groupMins: 10080 },
 };
 

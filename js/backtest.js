@@ -6,22 +6,25 @@
    ============================================================ */
 
 const BT_DEFAULTS = {
-  WARMUP:         200,   // bars for EMA200 + indicator warm-up
-  ATR_SL:         2.0,   // stop-loss = ATR × this
-  RR:             2.0,   // take-profit = SL distance × R:R
-  MIN_SCORE:      50,    // minimum |confidence score| to open a trade
-  USE_TREND_FILTER: true, // apply EMA200 + weekly trend filter
-  USE_TRAILING_STOP: false, // use a trailing stop-loss
-  TSL_FACTOR:       1.5,   // trailing stop ATR factor
-  TSL_TRIGGER_RR:   1.0,   // R:R multiple to activate trailing stop
+  WARMUP:               200,   // bars for EMA200 + indicator warm-up
+  ATR_SL:               2.0,   // stop-loss = ATR × this
+  RR:                   2.0,   // take-profit = SL distance × R:R
+  MIN_SCORE:            50,    // minimum |confidence score| to open a trade
+  USE_TREND_FILTER:     true,  // apply EMA200 + monthly/weekly trend filter
+  USE_TRAILING_STOP:    false, // use a trailing stop-loss
+  TSL_FACTOR:           1.5,   // trailing stop ATR factor
+  TSL_TRIGGER_RR:       1.0,   // R:R multiple to activate trailing stop
   // ── Entry quality filters ────────────────────────────────
   REQUIRE_WEEKLY_ALIGN:  false,   // require weekly bias to match direction (no NEUTRAL)
   REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
   RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
   MACD_CONFIRM:          false,   // daily MACD histogram must align with trade direction
   // ── Window & hold constraints ────────────────────────────
-  BT_WINDOW_DAYS: 66,    // backtest only the last N trading bars (≈3 months)
-  MAX_HOLD_DAYS:  3,     // force-close any trade held more than this many bars
+  BT_WINDOW_DAYS:       365,   // backtest last N trading bars (~1 year default)
+  MAX_HOLD_DAYS:         60,   // soft safety cap — bot exits via signals/trail/breakeven first
+  // ── Intelligent exit controls ────────────────────────────
+  BREAKEVEN_TRIGGER_RR:  1.0,  // move SL to entry once profit ≥ this × initial risk
+  REVERSAL_EXIT_SCORE:   45,   // exit immediately if opposite-direction score reaches this
 };
 
 // Global BT object to hold current settings
@@ -57,47 +60,116 @@ function _computeWeeklyFromDaily(dailyCandles, pipSize) {
   return weekly.length >= 5 ? detectBias(weekly, pipSize) : _BT_NEUTRAL_BIAS;
 }
 
+/* ── Monthly bias approximation from daily candles ───────── */
+// Groups every 20 daily bars into pseudo-monthly candles to give
+// the scorer long-term macro context without look-ahead bias.
+function _computeMonthlyFromDaily(dailyCandles, pipSize) {
+  if (!dailyCandles || dailyCandles.length < 40) return _BT_NEUTRAL_BIAS;
+  const monthly = [];
+  for (let i = 0; i < dailyCandles.length; i += 20) {
+    const g = dailyCandles.slice(i, i + 20);
+    if (g.length < 10) continue;
+    monthly.push({
+      ts:   g[g.length - 1].ts,
+      open: g[0].open  || g[0].rate,
+      high: Math.max(...g.map(c => c.high || c.rate)),
+      low:  Math.min(...g.map(c => c.low  || c.rate)),
+      rate: g[g.length - 1].rate,
+    });
+  }
+  return monthly.length >= 3 ? detectBias(monthly, pipSize) : _BT_NEUTRAL_BIAS;
+}
+
 /* ── Signal from a fixed candle slice (no API calls) ─────── */
-// Now includes weekly-trend approximation for proper multi-TF scoring.
-// Also exposes weeklyBias and dailyRsi for the walk-forward filters.
+// True 5-level multi-timeframe hierarchy built entirely from daily candles:
+//   'weekly'  slot ← monthly macro context   (group 20 bars → monthly candles)
+//   'daily'   slot ← weekly trend context    (group 5 bars  → weekly candles)
+//   'h4'      slot ← medium-term momentum   (last 60 daily bars)
+//   'h2'      slot ← short-term momentum    (last 20 daily bars)
+//   'h1'      slot ← recent entry timing    (last 10 daily bars)
+// This lets the scoring engine apply its full confluence logic:
+// higher TFs set trend direction, lower TFs time the entry.
 function _btSignal(candles, pipSize) {
+  // Full-history indicators — accurate EMA200/ATR anchored to all available history
   const ind = computeIndicators(candles, pipSize);
   if (!ind || !ind.atr) return null;
 
-  const bias    = detectBias(candles, pipSize);
-  const wBias   = _computeWeeklyFromDaily(candles, pipSize);
-  const zones   = detectZones(candles, pipSize);
-  const hs      = detectHeadAndShoulders(candles);
-  const cp      = detectCandlestickPatterns(candles);
+  // 1. Monthly macro context
+  const monthlyBias = _computeMonthlyFromDaily(candles, pipSize);
+
+  // 2. Weekly trend
+  const weeklyBias  = _computeWeeklyFromDaily(candles, pipSize);
+
+  // 3. Medium-term momentum — last 60 bars (~3 months of daily data)
+  const medSlice  = candles.length > 60 ? candles.slice(-60) : candles;
+  const medBias   = detectBias(medSlice, pipSize);
+  const medInd    = computeIndicators(medSlice, pipSize);
+
+  // 4. Short-term momentum — last 20 bars (~1 month of daily data)
+  const shortSlice = candles.length > 20 ? candles.slice(-20) : candles;
+  const shortBias  = detectBias(shortSlice, pipSize);
+  const shortInd   = computeIndicators(shortSlice, pipSize);
+
+  // 5. Recent entry timing — last 10 bars (~2 weeks of daily data)
+  const recentSlice = candles.length > 10 ? candles.slice(-10) : candles;
+  const recentBias  = detectBias(recentSlice, pipSize);
 
   const currentPrice = candles[candles.length - 1].rate;
 
+  // Supply/demand zones at macro, medium, and short horizons
+  const longZones  = detectZones(candles, pipSize);
+  const medZones   = detectZones(medSlice, pipSize);
+  const shortZones = detectZones(shortSlice, pipSize);
+
+  // Head & Shoulders across timeframes
+  const hs      = detectHeadAndShoulders(candles);
+  const shortHs = detectHeadAndShoulders(shortSlice);
+
+  // Candlestick patterns
+  const cp      = detectCandlestickPatterns(candles);
+  const shortCp = detectCandlestickPatterns(shortSlice);
+
   const conf = calcConfidenceScore(
-    // h4 uses daily bias as proxy: daily and 4H trends are strongly correlated
-    // at end-of-day and we have no intraday data in this daily backtest.
-    // h2/h1/m30 stay neutral to avoid triggering artificial confluence bonuses.
-    { weekly: wBias, daily: bias, h4: bias, h2: _BT_NEUTRAL_BIAS, h1: _BT_NEUTRAL_BIAS, m30: _BT_NEUTRAL_BIAS },
-    { weekly: _BT_EMPTY_ZONES, daily: zones, h4: _BT_EMPTY_ZONES },
-    { weekly: _BT_NO_HS, daily: hs, h4: _BT_NO_HS },
-    { daily: cp, h4: [], h2: [] },
-    { daily: ind, h4: null, h2: null, h1: null, m30: null },
+    // Proper multi-TF hierarchy: monthly → weekly → medium → short → recent
+    { weekly: monthlyBias, daily: weeklyBias, h4: medBias, h2: shortBias, h1: recentBias, m30: _BT_NEUTRAL_BIAS },
+    { weekly: longZones,   daily: medZones,   h4: shortZones },
+    { weekly: _BT_NO_HS,   daily: hs,         h4: shortHs },
+    { daily: cp,           h4: shortCp,       h2: [] },
+    { daily: medInd || ind, h4: shortInd,     h2: null, h1: null, m30: null },
     currentPrice, pipSize
   );
 
-  return { ...conf, atr: ind.atr, ema200: ind.ema200, weeklyBias: wBias.bias,
-           dailyRsi: ind.rsi, dailyMacdHist: ind.histogram };
+  return {
+    ...conf,
+    atr:            ind.atr,
+    ema200:         ind.ema200,
+    monthlyBias:    monthlyBias.bias,
+    weeklyBias:     weeklyBias.bias,
+    dailyRsi:       medInd ? medInd.rsi       : ind.rsi,
+    dailyMacdHist:  medInd ? medInd.histogram : ind.histogram,
+  };
 }
 
 /* ── Walk-forward simulation ─────────────────────────────── */
-// Only opens trades within the last BT.BT_WINDOW_DAYS bars so we
-// backtest 1–3 months of real market data rather than 2 full years.
-// Forces close of any trade held longer than BT.MAX_HOLD_DAYS bars.
+// The bot evaluates a full 5-level multi-timeframe signal every bar and
+// makes all decisions autonomously:
+//   Entry: when multi-TF confluence score passes MIN_SCORE, all filters pass
+//          and monthly macro trend does not oppose direction.
+//   Exit:  in priority order —
+//     1. Breakeven management  — move SL to entry once BREAKEVEN_TRIGGER_RR
+//        profit reached; protects capital on winning trades.
+//     2. Trailing stop         — optional, activates after TSL_TRIGGER_RR profit.
+//     3. Signal reversal       — immediately exit when opposite-direction score
+//        reaches REVERSAL_EXIT_SCORE; bot pivots on new evidence.
+//     4. Soft time cap         — MAX_HOLD_DAYS safety fallback (generous, 60 days).
+//     5. SL / TP hits.
+// No hard hold limit: the bot decides when a trade is done.
 function _walkForward(candles, pipSize) {
   const trades   = [];
   let   position = null;
 
-  // Only enter new trades inside the recent window; signal computation
-  // still uses the full candle history for accurate indicators.
+  // Only enter new trades inside the backtest window; signal computation
+  // still uses the full candle history for accurate EMA200/ATR.
   const btWindowStart = Math.max(BT.WARMUP, candles.length - BT.BT_WINDOW_DAYS);
 
   for (let i = btWindowStart; i < candles.length - 1; i++) {
@@ -106,38 +178,64 @@ function _walkForward(candles, pipSize) {
 
     /* ── Manage open position ───────────────────────── */
     if (position) {
-      const hi = next.high ?? next.rate;
-      const lo = next.low  ?? next.rate;
-      let exitPrice = null, exitType = null;
-
-      // Force-close if held for MAX_HOLD_DAYS bars (open at next bar's open)
+      const hi       = next.high ?? next.rate;
+      const lo       = next.low  ?? next.rate;
+      const slDist   = Math.abs(position.entry - position.sl);
       const barsHeld = (i + 1) - position.entryBar;
-      if (barsHeld >= BT.MAX_HOLD_DAYS) {
-        exitPrice = next.open ?? next.rate;
-        exitType  = 'TIME';
+      let exitPrice  = null, exitType = null;
+
+      // 1. Breakeven management: once profit ≥ BREAKEVEN_TRIGGER_RR × initial risk,
+      //    move SL to entry so this trade can no longer be a net loser.
+      if (!position.breakevenMoved && slDist > 0) {
+        const beTarget = BT.BREAKEVEN_TRIGGER_RR * slDist;
+        const inProfit = position.direction === 'LONG'
+          ? hi >= position.entry + beTarget
+          : lo <= position.entry - beTarget;
+        if (inProfit) {
+          position.sl = position.entry;
+          position.breakevenMoved = true;
+        }
       }
 
-      // Trailing stop update (only if not already exiting by time)
+      // 2. Trailing stop (optional): ratchets SL behind price once activated
       if (!exitPrice && BT.USE_TRAILING_STOP && sig && sig.atr) {
         if (position.direction === 'LONG') {
-          const triggerPrice = position.entry + (position.tp - position.entry) / BT.RR * BT.TSL_TRIGGER_RR;
+          const triggerPrice = position.entry + slDist * BT.TSL_TRIGGER_RR;
           if (hi > triggerPrice) {
-            position.sl = Math.max(position.sl, hi - (sig.atr * BT.TSL_FACTOR));
+            position.sl = Math.max(position.sl, hi - sig.atr * BT.TSL_FACTOR);
           }
-        } else { // SHORT
-          const triggerPrice = position.entry - (position.entry - position.tp) / BT.RR * BT.TSL_TRIGGER_RR;
+        } else {
+          const triggerPrice = position.entry - slDist * BT.TSL_TRIGGER_RR;
           if (lo < triggerPrice) {
-            position.sl = Math.min(position.sl, lo + (sig.atr * BT.TSL_FACTOR));
+            position.sl = Math.min(position.sl, lo + sig.atr * BT.TSL_FACTOR);
           }
         }
       }
 
-      // SL / TP check (only if not already exiting)
+      // 3. Signal reversal exit: the full multi-TF analysis now strongly favours
+      //    the opposite direction — bot acknowledges new evidence and closes.
+      if (!exitPrice && sig && Math.abs(sig.score) >= BT.REVERSAL_EXIT_SCORE) {
+        const reversal =
+          (position.direction === 'LONG'  && sig.recommendation.includes('SELL')) ||
+          (position.direction === 'SHORT' && sig.recommendation.includes('BUY'));
+        if (reversal) {
+          exitPrice = next.open ?? next.rate;
+          exitType  = 'REVERSAL';
+        }
+      }
+
+      // 4. Soft safety cap: close if held too long regardless of signals
+      if (!exitPrice && barsHeld >= BT.MAX_HOLD_DAYS) {
+        exitPrice = next.open ?? next.rate;
+        exitType  = 'TIME';
+      }
+
+      // 5. SL / TP check
       if (!exitPrice) {
         if (position.direction === 'LONG') {
           if (lo  <= position.sl)     { exitPrice = position.sl; exitType = 'SL'; }
           else if (hi >= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
-        } else { // SHORT
+        } else {
           if (hi >= position.sl)      { exitPrice = position.sl; exitType = 'SL'; }
           else if (lo <= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
         }
@@ -163,19 +261,25 @@ function _walkForward(candles, pipSize) {
         const entry  = next.open ?? next.rate;
         const slDist = sig.atr * BT.ATR_SL;
 
-        if (slDist) { // Skip if ATR is zero
+        if (slDist) {
           // EMA200 trend filter
           const emaOK = !BT.USE_TREND_FILTER || !sig.ema200 ||
             (direction === 'LONG'  && entry >= sig.ema200) ||
             (direction === 'SHORT' && entry <= sig.ema200);
 
-          // Weekly alignment — REQUIRE_WEEKLY_ALIGN blocks NEUTRAL weekly too
+          // Monthly macro filter: never trade counter to the monthly trend
+          const monthlyOK = !BT.USE_TREND_FILTER || !sig.monthlyBias ||
+            sig.monthlyBias === 'NEUTRAL' ||
+            (direction === 'LONG'  && sig.monthlyBias === 'BULLISH') ||
+            (direction === 'SHORT' && sig.monthlyBias === 'BEARISH');
+
+          // Weekly alignment
           const weeklyOK = !BT.USE_TREND_FILTER || !sig.weeklyBias ||
             (!BT.REQUIRE_WEEKLY_ALIGN && sig.weeklyBias === 'NEUTRAL') ||
             (direction === 'LONG'  && sig.weeklyBias === 'BULLISH') ||
             (direction === 'SHORT' && sig.weeklyBias === 'BEARISH');
 
-          // RSI gate: NORMAL (68/32), STRICT (60/40), or OFF
+          // RSI gate
           const rsiLim = BT.RSI_FILTER === 'STRICT' ? { ob: 60, os: 40 }
                        : BT.RSI_FILTER === 'OFF'    ? { ob: 100, os: 0  }
                        :                              { ob: 68,  os: 32  };
@@ -183,26 +287,27 @@ function _walkForward(candles, pipSize) {
             (direction === 'LONG'  && sig.dailyRsi < rsiLim.ob) ||
             (direction === 'SHORT' && sig.dailyRsi > rsiLim.os);
 
-          // Strong signal: only STRONG BUY / STRONG SELL (|score| >= 60)
+          // Strong signal gate
           const strongOK = !BT.REQUIRE_STRONG_SIGNAL || Math.abs(sig.score) >= 60;
 
-          // MACD confirmation: histogram must align with trade direction
+          // MACD confirmation
           const macdOK = !BT.MACD_CONFIRM || sig.dailyMacdHist == null ||
             (direction === 'LONG'  && sig.dailyMacdHist > 0) ||
             (direction === 'SHORT' && sig.dailyMacdHist < 0);
 
-          if (emaOK && weeklyOK && rsiOK && strongOK && macdOK) {
+          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK) {
             const sl = direction === 'LONG' ? entry - slDist : entry + slDist;
             const tp = direction === 'LONG' ? entry + slDist * BT.RR : entry - slDist * BT.RR;
             position = { direction, entry, sl, tp, entryBar: i + 1,
-                         score: sig.score, recommendation: sig.recommendation, ts: next.ts };
+                         score: sig.score, recommendation: sig.recommendation, ts: next.ts,
+                         breakevenMoved: false };
           }
         }
       }
     }
   }
 
-  /* Force-close open position at end of window */
+  /* Force-close open position at end of backtest window */
   if (position) {
     const last = candles[candles.length - 1];
     const pips = position.direction === 'LONG'
@@ -241,9 +346,11 @@ function _btStats(trades) {
   const avgLoss      = losses.length ? grossLoss / losses.length : 0;
 
   /* Composite score 0–100 */
+  // Scale pip target with backtest window: ~1.5 pips/day is a solid target
+  const pipTarget = Math.max(200, Math.round(BT.BT_WINDOW_DAYS * 1.5));
   const wrPts  = Math.min(winRate / 0.60, 1) * 100 * 0.40;
   const pfPts  = Math.min(profitFactor / 2, 1) * 100 * 0.30;
-  const pipPts = totalPips > 0 ? Math.min(totalPips / 200, 1) * 100 * 0.30 : 0;
+  const pipPts = totalPips > 0 ? Math.min(totalPips / pipTarget, 1) * 100 * 0.30 : 0;
   const profitabilityScore = Math.max(0, Math.round(wrPts + pfPts + pipPts));
 
   return {
@@ -362,21 +469,27 @@ function _buildBacktestResult(result, f, t) {
   const scoreLabel = _btScoreLabel(profitabilityScore);
   const curveSvg = _drawEquityCurve(equityCurve);
 
-  const settingsDesc = `min score ${BT.MIN_SCORE}` +
-    (BT.USE_TREND_FILTER      ? ' · EMA200 filter'    : '') +
+  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
+                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
+                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
+                    : '~3mo';
+  const settingsDesc = `min score ${BT.MIN_SCORE} · ${windowLabel} window` +
+    (BT.USE_TREND_FILTER      ? ' · trend filter'     : '') +
     (BT.REQUIRE_WEEKLY_ALIGN  ? ' · weekly req.'      : '') +
     (BT.REQUIRE_STRONG_SIGNAL ? ' · strong only'      : '') +
     (BT.RSI_FILTER !== 'NORMAL' ? ` · RSI ${BT.RSI_FILTER.toLowerCase()}` : '') +
     (BT.MACD_CONFIRM          ? ' · MACD confirm'     : '') +
-    (BT.USE_TRAILING_STOP     ? ` · TSL (${BT.TSL_TRIGGER_RR}R, ${BT.TSL_FACTOR}×ATR)` : '');
+    (BT.USE_TRAILING_STOP     ? ` · TSL (${BT.TSL_TRIGGER_RR}R, ${BT.TSL_FACTOR}×ATR)` : '') +
+    ` · BE@${BT.BREAKEVEN_TRIGGER_RR}R · rev≥${BT.REVERSAL_EXIT_SCORE}`;
 
   const recentTrades = (trades || []).slice(-8).reverse().map(tr => {
     const cls  = tr.pips > 0 ? 'bt-tr-win' : tr.pips <= 0 ? 'bt-tr-loss' : '';
     const icon = tr.direction === 'LONG' ? '▲' : '▼';
     const sign = tr.pips >= 0 ? '+' : '';
-    const exit = tr.exitType === 'SL'   ? 'SL'
-               : tr.exitType === 'TP'   ? 'TP'
-               : tr.exitType === 'TIME' ? 'TIME' : '—';
+    const exit = tr.exitType === 'SL'       ? 'SL'
+               : tr.exitType === 'TP'       ? 'TP'
+               : tr.exitType === 'TIME'     ? 'TIME'
+               : tr.exitType === 'REVERSAL' ? 'REV' : '—';
     return `<div class="bt-trade-row ${cls}">
       <span class="bt-tr-dir">${icon}</span>
       <span class="bt-tr-exit">${exit}</span>
@@ -445,6 +558,7 @@ function _buildBacktestResult(result, f, t) {
         <span class="bt-leg bt-leg-sl">● SL exit</span>
         <span class="bt-leg bt-leg-tp">● TP exit</span>
         <span class="bt-leg bt-leg-time">● Time exit</span>
+        <span class="bt-leg bt-leg-reversal">● Reversal exit</span>
         <span class="bt-leg bt-leg-sl-line">— SL level</span>
         <span class="bt-leg bt-leg-tp-line">— TP level</span>
       </div>
@@ -500,19 +614,21 @@ function _getBTSavedSetting(key, defaultValue) {
 }
 
 function _updateBTState() {
-    BT.MIN_SCORE             = _getBTSavedSetting('min_score',             BT_DEFAULTS.MIN_SCORE);
-    BT.ATR_SL                = _getBTSavedSetting('atr_sl',                BT_DEFAULTS.ATR_SL);
-    BT.RR                    = _getBTSavedSetting('rr',                    BT_DEFAULTS.RR);
-    BT.USE_TREND_FILTER      = _getBTSavedSetting('use_trend_filter',       BT_DEFAULTS.USE_TREND_FILTER);
-    BT.USE_TRAILING_STOP     = _getBTSavedSetting('use_trailing_stop',      BT_DEFAULTS.USE_TRAILING_STOP);
-    BT.TSL_FACTOR            = _getBTSavedSetting('tsl_factor',             BT_DEFAULTS.TSL_FACTOR);
-    BT.TSL_TRIGGER_RR        = _getBTSavedSetting('tsl_trigger_rr',         BT_DEFAULTS.TSL_TRIGGER_RR);
-    BT.REQUIRE_WEEKLY_ALIGN  = _getBTSavedSetting('require_weekly_align',   BT_DEFAULTS.REQUIRE_WEEKLY_ALIGN);
-    BT.REQUIRE_STRONG_SIGNAL = _getBTSavedSetting('require_strong_signal',  BT_DEFAULTS.REQUIRE_STRONG_SIGNAL);
-    BT.RSI_FILTER            = _getBTSavedSetting('rsi_filter',             BT_DEFAULTS.RSI_FILTER);
-    BT.MACD_CONFIRM          = _getBTSavedSetting('macd_confirm',           BT_DEFAULTS.MACD_CONFIRM);
-    BT.BT_WINDOW_DAYS        = _getBTSavedSetting('window_days',            BT_DEFAULTS.BT_WINDOW_DAYS);
-    BT.MAX_HOLD_DAYS         = _getBTSavedSetting('max_hold_days',          BT_DEFAULTS.MAX_HOLD_DAYS);
+    BT.MIN_SCORE              = _getBTSavedSetting('min_score',              BT_DEFAULTS.MIN_SCORE);
+    BT.ATR_SL                 = _getBTSavedSetting('atr_sl',                 BT_DEFAULTS.ATR_SL);
+    BT.RR                     = _getBTSavedSetting('rr',                     BT_DEFAULTS.RR);
+    BT.USE_TREND_FILTER       = _getBTSavedSetting('use_trend_filter',        BT_DEFAULTS.USE_TREND_FILTER);
+    BT.USE_TRAILING_STOP      = _getBTSavedSetting('use_trailing_stop',       BT_DEFAULTS.USE_TRAILING_STOP);
+    BT.TSL_FACTOR             = _getBTSavedSetting('tsl_factor',              BT_DEFAULTS.TSL_FACTOR);
+    BT.TSL_TRIGGER_RR         = _getBTSavedSetting('tsl_trigger_rr',          BT_DEFAULTS.TSL_TRIGGER_RR);
+    BT.REQUIRE_WEEKLY_ALIGN   = _getBTSavedSetting('require_weekly_align',    BT_DEFAULTS.REQUIRE_WEEKLY_ALIGN);
+    BT.REQUIRE_STRONG_SIGNAL  = _getBTSavedSetting('require_strong_signal',   BT_DEFAULTS.REQUIRE_STRONG_SIGNAL);
+    BT.RSI_FILTER             = _getBTSavedSetting('rsi_filter',              BT_DEFAULTS.RSI_FILTER);
+    BT.MACD_CONFIRM           = _getBTSavedSetting('macd_confirm',            BT_DEFAULTS.MACD_CONFIRM);
+    BT.BT_WINDOW_DAYS         = _getBTSavedSetting('window_days',             BT_DEFAULTS.BT_WINDOW_DAYS);
+    BT.MAX_HOLD_DAYS          = _getBTSavedSetting('max_hold_days',           BT_DEFAULTS.MAX_HOLD_DAYS);
+    BT.BREAKEVEN_TRIGGER_RR   = _getBTSavedSetting('breakeven_trigger_rr',    BT_DEFAULTS.BREAKEVEN_TRIGGER_RR);
+    BT.REVERSAL_EXIT_SCORE    = _getBTSavedSetting('reversal_exit_score',     BT_DEFAULTS.REVERSAL_EXIT_SCORE);
 }
 
 function _onBTSettingChange(key, val) {
@@ -571,7 +687,8 @@ function _precomputeBtSignals(candles, pipSize) {
 }
 
 // Walk-forward using precomputed signals + a custom settings object.
-// Omits trailing-stop logic for simplicity in the optimizer sweep.
+// Includes breakeven management and signal-reversal exits; omits trailing stop
+// for optimizer sweep speed (parameter not varied by the optimizer).
 function _walkForwardFast(candles, sigs, pipSize, cfg) {
   const { MIN_SCORE, ATR_SL, RR, USE_TREND_FILTER,
           REQUIRE_WEEKLY_ALIGN, REQUIRE_STRONG_SIGNAL, RSI_FILTER, MACD_CONFIRM } = cfg;
@@ -589,12 +706,34 @@ function _walkForwardFast(candles, sigs, pipSize, cfg) {
 
     if (pos) {
       let exitPrice = null, exitType = null;
-      if (pos.dir === 'LONG') {
-        if (lo  <= pos.sl) { exitPrice = pos.sl; exitType = 'SL'; }
-        else if (hi >= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
-      } else {
-        if (hi >= pos.sl) { exitPrice = pos.sl; exitType = 'SL'; }
-        else if (lo <= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
+      const slDist = Math.abs(pos.entry - pos.sl);
+
+      // Breakeven management
+      if (!pos.breakevenMoved && slDist > 0) {
+        const beTarget = BT.BREAKEVEN_TRIGGER_RR * slDist;
+        const inProfit = pos.dir === 'LONG'
+          ? hi >= pos.entry + beTarget
+          : lo <= pos.entry - beTarget;
+        if (inProfit) { pos.sl = pos.entry; pos.breakevenMoved = true; }
+      }
+
+      // Signal reversal exit
+      if (!exitPrice && sig && Math.abs(sig.score) >= BT.REVERSAL_EXIT_SCORE) {
+        const reversal =
+          (pos.dir === 'LONG'  && sig.recommendation.includes('SELL')) ||
+          (pos.dir === 'SHORT' && sig.recommendation.includes('BUY'));
+        if (reversal) { exitPrice = next.open ?? next.rate; exitType = 'REVERSAL'; }
+      }
+
+      // SL / TP
+      if (!exitPrice) {
+        if (pos.dir === 'LONG') {
+          if (lo  <= pos.sl)     { exitPrice = pos.sl; exitType = 'SL'; }
+          else if (hi >= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
+        } else {
+          if (hi >= pos.sl)      { exitPrice = pos.sl; exitType = 'SL'; }
+          else if (lo <= pos.tp) { exitPrice = pos.tp; exitType = 'TP'; }
+        }
       }
       if (exitPrice !== null) {
         const pips = pos.dir === 'LONG'
@@ -612,24 +751,28 @@ function _walkForwardFast(candles, sigs, pipSize, cfg) {
         const entry  = next.open ?? next.rate;
         const slDist = sig.atr * ATR_SL;
         if (slDist) {
-          const emaOK    = !USE_TREND_FILTER || !sig.ema200 ||
+          const emaOK     = !USE_TREND_FILTER || !sig.ema200 ||
             (dir === 'LONG'  && entry >= sig.ema200) ||
             (dir === 'SHORT' && entry <= sig.ema200);
-          const weeklyOK = !USE_TREND_FILTER || !sig.weeklyBias ||
+          const monthlyOK = !USE_TREND_FILTER || !sig.monthlyBias ||
+            sig.monthlyBias === 'NEUTRAL' ||
+            (dir === 'LONG'  && sig.monthlyBias === 'BULLISH') ||
+            (dir === 'SHORT' && sig.monthlyBias === 'BEARISH');
+          const weeklyOK  = !USE_TREND_FILTER || !sig.weeklyBias ||
             (!REQUIRE_WEEKLY_ALIGN && sig.weeklyBias === 'NEUTRAL') ||
             (dir === 'LONG'  && sig.weeklyBias === 'BULLISH') ||
             (dir === 'SHORT' && sig.weeklyBias === 'BEARISH');
-          const rsiOK    = sig.dailyRsi == null ||
+          const rsiOK     = sig.dailyRsi == null ||
             (dir === 'LONG'  && sig.dailyRsi < rsiLim.ob) ||
             (dir === 'SHORT' && sig.dailyRsi > rsiLim.os);
-          const strongOK = !REQUIRE_STRONG_SIGNAL || Math.abs(sig.score) >= 60;
-          const macdOK   = !MACD_CONFIRM || sig.dailyMacdHist == null ||
+          const strongOK  = !REQUIRE_STRONG_SIGNAL || Math.abs(sig.score) >= 60;
+          const macdOK    = !MACD_CONFIRM || sig.dailyMacdHist == null ||
             (dir === 'LONG'  && sig.dailyMacdHist > 0) ||
             (dir === 'SHORT' && sig.dailyMacdHist < 0);
-          if (emaOK && weeklyOK && rsiOK && strongOK && macdOK) {
+          if (emaOK && monthlyOK && weeklyOK && rsiOK && strongOK && macdOK) {
             const sl = dir === 'LONG' ? entry - slDist : entry + slDist;
             const tp = dir === 'LONG' ? entry + slDist * RR : entry - slDist * RR;
-            pos = { dir, entry, sl, tp };
+            pos = { dir, entry, sl, tp, breakevenMoved: false };
           }
         }
       }
@@ -944,16 +1087,18 @@ function _renderBtTradeChart(result) {
       });
     }
 
-    // Exit circle — red=SL, green=TP, purple=TIME, grey=force close
+    // Exit circle — red=SL, green=TP, purple=TIME, orange=REVERSAL, grey=force close
     if (exitTime && chartTimeSet.has(exitTime)) {
-      const exitColor = tr.exitType === 'SL'   ? '#F85149'
-                      : tr.exitType === 'TP'   ? '#3FB950'
-                      : tr.exitType === 'TIME' ? '#A371F7'
-                      :                          '#8B949E';
-      const exitText  = tr.exitType === 'SL'   ? 'SL'
-                      : tr.exitType === 'TP'   ? 'TP'
-                      : tr.exitType === 'TIME' ? 'T'
-                      :                          'X';
+      const exitColor = tr.exitType === 'SL'       ? '#F85149'
+                      : tr.exitType === 'TP'       ? '#3FB950'
+                      : tr.exitType === 'TIME'     ? '#A371F7'
+                      : tr.exitType === 'REVERSAL' ? '#F0B72F'
+                      :                              '#8B949E';
+      const exitText  = tr.exitType === 'SL'       ? 'SL'
+                      : tr.exitType === 'TP'       ? 'TP'
+                      : tr.exitType === 'TIME'     ? 'T'
+                      : tr.exitType === 'REVERSAL' ? 'R'
+                      :                              'X';
       markers.push({
         time:     exitTime,
         position: tr.direction === 'LONG' ? 'aboveBar' : 'belowBar',
@@ -1092,26 +1237,45 @@ function appendBacktestSection(panel, f, t) {
         </div>
       </div>
 
-      <div class="bt-setting-divider">Backtest Window &amp; Trade Duration</div>
+      <div class="bt-setting-divider">Backtest Window &amp; Intelligent Exit Controls</div>
 
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-bt-window-days">Backtest Period
-          <span class="bt-setting-hint">How many recent trading days to simulate</span>
+        <label class="bt-setting-label" for="bt-window-days">Backtest Period
+          <span class="bt-setting-hint">How many recent trading days to simulate (uses up to 5yr of history)</span>
         </label>
         <div class="bt-setting-ctrl">
           <select id="bt-window-days" class="bt-select" onchange="_onBTSettingChange('window_days', this.value)">
-            <option value="22"  ${BT.BT_WINDOW_DAYS === 22  ? 'selected' : ''}>1 month (~22 days)</option>
-            <option value="44"  ${BT.BT_WINDOW_DAYS === 44  ? 'selected' : ''}>2 months (~44 days)</option>
             <option value="66"  ${BT.BT_WINDOW_DAYS === 66  ? 'selected' : ''}>3 months (~66 days)</option>
+            <option value="130" ${BT.BT_WINDOW_DAYS === 130 ? 'selected' : ''}>6 months (~130 days)</option>
+            <option value="365" ${BT.BT_WINDOW_DAYS === 365 ? 'selected' : ''}>1 year (~365 days)</option>
+            <option value="500" ${BT.BT_WINDOW_DAYS === 500 ? 'selected' : ''}>2 years (~500 days)</option>
           </select>
         </div>
       </div>
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-max-hold-days">Max Hold Days
-          <span class="bt-setting-hint">Force-close any trade held longer than this</span>
+        <label class="bt-setting-label" for="bt-breakeven-trigger-rr">Breakeven Trigger (×R)
+          <span class="bt-setting-hint">Move SL to entry once profit reaches this multiple of initial risk</span>
         </label>
         <div class="bt-setting-ctrl">
-          <input type="range" id="bt-max-hold-days" min="1" max="5" value="${BT.MAX_HOLD_DAYS}" step="1" oninput="_onBTSettingChange('max_hold_days', this.value)">
+          <input type="range" id="bt-breakeven-trigger-rr" min="0.5" max="2.0" value="${BT.BREAKEVEN_TRIGGER_RR}" step="0.1" oninput="_onBTSettingChange('breakeven_trigger_rr', this.value)">
+          <span id="bt-breakeven-trigger-rr-val" class="bt-range-val">${BT.BREAKEVEN_TRIGGER_RR}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-reversal-exit-score">Reversal Exit Threshold
+          <span class="bt-setting-hint">Close position immediately when opposite-direction score reaches this (bot pivots on new evidence)</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-reversal-exit-score" min="25" max="75" value="${BT.REVERSAL_EXIT_SCORE}" step="5" oninput="_onBTSettingChange('reversal_exit_score', this.value)">
+          <span id="bt-reversal-exit-score-val" class="bt-range-val">${BT.REVERSAL_EXIT_SCORE}</span>
+        </div>
+      </div>
+      <div class="bt-setting-row">
+        <label class="bt-setting-label" for="bt-max-hold-days">Safety Cap (days)
+          <span class="bt-setting-hint">Last-resort close if the bot hasn't exited by signal, SL, TP, or breakeven after this many bars</span>
+        </label>
+        <div class="bt-setting-ctrl">
+          <input type="range" id="bt-max-hold-days" min="7" max="120" value="${BT.MAX_HOLD_DAYS}" step="7" oninput="_onBTSettingChange('max_hold_days', this.value)">
           <span id="bt-max-hold-days-val" class="bt-range-val">${BT.MAX_HOLD_DAYS}</span>
         </div>
       </div>
@@ -1156,7 +1320,13 @@ function appendBacktestSection(panel, f, t) {
       </div>
     </div>
     <div class="bt-intro">
-      Walk-forward on real daily candles (1–3 month window, max 3-day hold). EMA200 is warmed on 2 years of data before trading begins. Signals use daily/weekly bias with ATR-based stops. The trade chart shows every entry, stop-loss level, take-profit level and exit.
+      Fully automated walk-forward simulation on up to 5 years of real daily candles.
+      The bot evaluates a true 5-level multi-timeframe hierarchy every bar — monthly macro
+      trend, weekly context, 60-day momentum, 20-day short-term, and 10-day entry timing —
+      then combines all signals with full confluence scoring to make entry decisions.
+      Exits are driven by intelligence: breakeven management locks in safety once profit
+      moves in your favour, signal reversals close trades when the multi-TF picture flips,
+      and an optional trailing stop locks in profits. No arbitrary time cap.
     </div>
     <button class="bt-run-btn" onclick="_launchBacktest('${f}','${t}')">Run Backtest</button>
     <div id="bt-result"></div>
