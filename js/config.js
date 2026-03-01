@@ -53,8 +53,10 @@ const INTERVAL_CONFIG = {
   "1h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 60    },
   "2h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 120   },
   "4h":  { yfInterval: "1h",  yfRange: "60d",  groupMins: 240   },
-  "1D":  { yfInterval: "1d",  yfRange: "5y",   groupMins: 1440  },
-  "1W":  { yfInterval: "1wk", yfRange: "10y",  groupMins: 10080 },
+  "1D":   { yfInterval: "1d",  yfRange: "5y",   groupMins: 1440  },
+  "1W":   { yfInterval: "1wk", yfRange: "10y",  groupMins: 10080 },
+  // Extended-range 1H fetch used exclusively by the backtester (up to 2yr of hourly bars)
+  "BT_1H": { yfInterval: "1h",  yfRange: "730d", groupMins: 60    },
 };
 
 const INTERVAL_LABELS = {
@@ -65,5 +67,5 @@ const INTERVAL_LABELS = {
 // Cache TTL in ms per interval
 const CACHE_TTL = {
   "1m":60_000, "5m":120_000, "15m":300_000, "30m":300_000,
-  "1h":600_000, "2h":900_000, "4h":900_000, "1D":3_600_000, "1W":3_600_000,
+  "1h":600_000, "2h":900_000, "4h":900_000, "1D":3_600_000, "1W":3_600_000, "BT_1H":3_600_000,
 };

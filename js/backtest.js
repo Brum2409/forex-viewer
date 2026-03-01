@@ -1,32 +1,34 @@
 /* ============================================================
    BACKTESTING ENGINE
-   Walk-forward simulation on daily candles. No look-ahead:
+   Walk-forward simulation on 1-hour candles. No look-ahead:
    signals are generated only from data[0..i], trade entered
    at data[i+1].open with ATR-based SL and 2:1 R:R take-profit.
+   Targets 1–5 trades per week using a genuine 5-level 1H
+   multi-timeframe hierarchy: weekly → daily → 4H → 2H → 1H.
    ============================================================ */
 
 const BT_DEFAULTS = {
-  WARMUP:               200,   // bars for EMA200 + indicator warm-up
-  ATR_SL:               2.0,   // stop-loss = ATR × this
+  WARMUP:               800,   // 1H bars for indicator warm-up (~33 trading days, ensures 4H EMA context)
+  ATR_SL:               2.0,   // stop-loss = 1H ATR × this
   RR:                   2.0,   // take-profit = SL distance × R:R
   MIN_SCORE:            50,    // minimum |confidence score| to open a trade
-  USE_TREND_FILTER:     true,  // apply EMA200 + monthly/weekly trend filter
+  USE_TREND_FILTER:     true,  // apply 1H EMA200 + weekly/daily macro trend filter
   USE_TRAILING_STOP:    false, // use a trailing stop-loss
   TSL_FACTOR:           1.5,   // trailing stop ATR factor
   TSL_TRIGGER_RR:       1.0,   // R:R multiple to activate trailing stop
   // ── Entry quality filters ────────────────────────────────
-  REQUIRE_WEEKLY_ALIGN:  false,   // require weekly bias to match direction (no NEUTRAL)
+  REQUIRE_WEEKLY_ALIGN:  false,   // require daily-context bias to match direction (no NEUTRAL)
   REQUIRE_STRONG_SIGNAL: false,   // require |score| >= 60 (STRONG BUY/SELL only)
   RSI_FILTER:           'NORMAL', // 'OFF' | 'NORMAL' (68/32) | 'STRICT' (60/40)
-  MACD_CONFIRM:          false,   // daily MACD histogram must align with trade direction
+  MACD_CONFIRM:          false,   // 4H MACD histogram must align with trade direction
   // ── Window & hold constraints ────────────────────────────
-  BT_WINDOW_DAYS:       365,   // backtest last N trading bars (~1 year default)
-  MAX_HOLD_DAYS:         60,   // soft safety cap — bot exits via signals/trail/breakeven first
+  BT_WINDOW_DAYS:       1560,  // backtest last N 1H bars (~3 months, ~1–5 trades/week pace)
+  MAX_HOLD_DAYS:        120,   // soft safety cap in 1H bars (120 = 5 trading days)
   // ── Intelligent exit controls ────────────────────────────
   BREAKEVEN_TRIGGER_RR:  1.0,  // move SL to entry once profit ≥ this × initial risk
   REVERSAL_EXIT_SCORE:   45,   // exit immediately if opposite-direction score reaches this
   // ── Short-term performance filters ──────────────────────
-  SCORE_CONSISTENCY:     0,    // require last N bars to signal same direction (0 = off, 2-3 practical)
+  SCORE_CONSISTENCY:     2,    // require last N 1H bars to signal same direction (2 = balanced noise filter)
   USE_VOLATILITY_FILTER: false,// skip entries when current bar's range < 75% of 20-bar avg (avoids ranging)
   // ── Partial take-profit ──────────────────────────────────
   PARTIAL_TP:            false, // close part of position at an early R:R target
@@ -37,11 +39,11 @@ const BT_DEFAULTS = {
   LOSS_COOLDOWN:         0,    // extra bars to wait after a losing trade specifically (0 = off)
   // ── Multi-timeframe consensus ────────────────────────────
   MIN_TF_CONSENSUS:      0,    // min number of the 5 TFs that must agree with direction (0 = off)
-  REQUIRE_TREND_ALIGN:   false,// all 3 trend TFs (monthly + weekly + medium) must point in direction
+  REQUIRE_TREND_ALIGN:   false,// all 3 trend TFs (weekly + daily + 4H) must point in direction
   // ── Advanced entry confirmation ──────────────────────────
-  EMA_SLOPE_FILTER:      false,// EMA200 must be sloping in trade direction (20-bar comparison)
+  EMA_SLOPE_FILTER:      false,// 1H EMA200 must be sloping in trade direction (20-bar comparison)
   CANDLE_CONFIRM:        false,// signal bar must close in the trade direction (bullish/bearish candle)
-  MONTHLY_STRICT:        false,// monthly bias must non-neutrally confirm (not just non-opposing)
+  MONTHLY_STRICT:        false,// weekly macro bias must non-neutrally confirm (not just non-opposing)
   // ── Dynamic stop management ──────────────────────────────
   MOVE_SL_AT_PARTIAL:    false,// after partial TP, move SL to breakeven automatically
   SCALE_IN:              false,// allow a second entry if score strengthens ≥ MIN_SCORE+15 while in trade
@@ -62,116 +64,122 @@ const _BT_NEUTRAL_BIAS = {
 const _BT_EMPTY_ZONES = { supply: [], demand: [] };
 const _BT_NO_HS       = { found: false, type: null, neckline: null, headPrice: null, confidence: null };
 
-/* ── Weekly bias approximation from daily candles ────────── */
-// Groups every 5 daily bars into pseudo-weekly candles to give
-// the scorer a weekly-trend perspective without look-ahead bias.
-function _computeWeeklyFromDaily(dailyCandles, pipSize) {
-  if (!dailyCandles || dailyCandles.length < 10) return _BT_NEUTRAL_BIAS;
-  const weekly = [];
-  for (let i = 0; i < dailyCandles.length; i += 5) {
-    const g = dailyCandles.slice(i, i + 5);
-    if (g.length < 3) continue;
-    weekly.push({
+/* ── Generic 1H candle aggregator ────────────────────────── */
+// Groups every `barsPerGroup` 1H bars into higher-TF candles.
+// Used to build the weekly/daily/4H/2H context from raw 1H data.
+// Only processes the last `maxGroups` complete groups for efficiency.
+function _groupCandlesInto(candles, barsPerGroup, maxGroups = Infinity) {
+  if (!candles || candles.length < barsPerGroup) return [];
+  // Limit the input window so we never process more bars than needed
+  const neededBars = maxGroups === Infinity ? candles.length : maxGroups * barsPerGroup;
+  const src = candles.length > neededBars ? candles.slice(-neededBars) : candles;
+  const groups = [];
+  for (let i = 0; i < src.length; i += barsPerGroup) {
+    const g = src.slice(i, i + barsPerGroup);
+    if (g.length < Math.ceil(barsPerGroup / 2)) continue; // discard very short tail groups
+    groups.push({
       ts:   g[g.length - 1].ts,
-      open: g[0].open  || g[0].rate,
-      high: Math.max(...g.map(c => c.high || c.rate)),
-      low:  Math.min(...g.map(c => c.low  || c.rate)),
+      open: g[0].open  ?? g[0].rate,
+      high: Math.max(...g.map(c => c.high ?? c.rate)),
+      low:  Math.min(...g.map(c => c.low  ?? c.rate)),
       rate: g[g.length - 1].rate,
     });
   }
-  return weekly.length >= 5 ? detectBias(weekly, pipSize) : _BT_NEUTRAL_BIAS;
+  return groups;
 }
 
-/* ── Monthly bias approximation from daily candles ───────── */
-// Groups every 20 daily bars into pseudo-monthly candles to give
-// the scorer long-term macro context without look-ahead bias.
-function _computeMonthlyFromDaily(dailyCandles, pipSize) {
-  if (!dailyCandles || dailyCandles.length < 40) return _BT_NEUTRAL_BIAS;
-  const monthly = [];
-  for (let i = 0; i < dailyCandles.length; i += 20) {
-    const g = dailyCandles.slice(i, i + 20);
-    if (g.length < 10) continue;
-    monthly.push({
-      ts:   g[g.length - 1].ts,
-      open: g[0].open  || g[0].rate,
-      high: Math.max(...g.map(c => c.high || c.rate)),
-      low:  Math.min(...g.map(c => c.low  || c.rate)),
-      rate: g[g.length - 1].rate,
-    });
-  }
-  return monthly.length >= 3 ? detectBias(monthly, pipSize) : _BT_NEUTRAL_BIAS;
-}
-
-/* ── Signal from a fixed candle slice (no API calls) ─────── */
-// True 5-level multi-timeframe hierarchy built entirely from daily candles:
-//   'weekly'  slot ← monthly macro context   (group 20 bars → monthly candles)
-//   'daily'   slot ← weekly trend context    (group 5 bars  → weekly candles)
-//   'h4'      slot ← medium-term momentum   (last 60 daily bars)
-//   'h2'      slot ← short-term momentum    (last 20 daily bars)
-//   'h1'      slot ← recent entry timing    (last 10 daily bars)
-// This lets the scoring engine apply its full confluence logic:
-// higher TFs set trend direction, lower TFs time the entry.
+/* ── Signal from a fixed 1H candle slice (no API calls) ──── */
+// Genuine 5-level multi-timeframe hierarchy built from 1H candles:
+//   'weekly' slot ← weekly macro context  (group 120 1H bars → weekly candles)
+//   'daily'  slot ← daily trend           (group 24 1H bars  → daily candles,  last 60)
+//   'h4'     slot ← 4H momentum           (group 4 1H bars   → 4H candles,     last 120)
+//   'h2'     slot ← 2H momentum           (group 2 1H bars   → 2H candles,     last 48)
+//   'h1'     slot ← 1H entry timing       (raw 1H bars,                         last 24)
+// Higher TFs set trend direction; lower TFs time the entry.
+// Each timeframe uses only the bars it needs — no wasted computation.
 function _btSignal(candles, pipSize) {
-  // Full-history indicators — accurate EMA200/ATR anchored to all available history
-  const ind = computeIndicators(candles, pipSize);
-  if (!ind || !ind.atr) return null;
-
-  // 1. Monthly macro context
-  const monthlyBias = _computeMonthlyFromDaily(candles, pipSize);
-
-  // 2. Weekly trend
-  const weeklyBias  = _computeWeeklyFromDaily(candles, pipSize);
-
-  // 3. Medium-term momentum — last 60 bars (~3 months of daily data)
-  const medSlice  = candles.length > 60 ? candles.slice(-60) : candles;
-  const medBias   = detectBias(medSlice, pipSize);
-  const medInd    = computeIndicators(medSlice, pipSize);
-
-  // 4. Short-term momentum — last 20 bars (~1 month of daily data)
-  const shortSlice = candles.length > 20 ? candles.slice(-20) : candles;
-  const shortBias  = detectBias(shortSlice, pipSize);
-  const shortInd   = computeIndicators(shortSlice, pipSize);
-
-  // 5. Recent entry timing — last 10 bars (~2 weeks of daily data)
-  const recentSlice = candles.length > 10 ? candles.slice(-10) : candles;
-  const recentBias  = detectBias(recentSlice, pipSize);
-
   const currentPrice = candles[candles.length - 1].rate;
 
-  // Supply/demand zones at macro, medium, and short horizons
-  const longZones  = detectZones(candles, pipSize);
-  const medZones   = detectZones(medSlice, pipSize);
-  const shortZones = detectZones(shortSlice, pipSize);
+  // 1H indicators for EMA200 (trend filter) and ATR (position sizing)
+  // Use last 200 bars — sufficient for a stable 1H EMA200
+  const h1Window = candles.length > 200 ? candles.slice(-200) : candles;
+  const ind = computeIndicators(h1Window, pipSize);
+  if (!ind || !ind.atr) return null;
 
-  // Head & Shoulders across timeframes
-  const hs      = detectHeadAndShoulders(candles);
-  const shortHs = detectHeadAndShoulders(shortSlice);
+  // 1. Weekly macro context — group 120 1H bars → weekly candles (max 22 weeks)
+  const weeklyCandles = _groupCandlesInto(candles, 120, 22);
+  const weeklyBias    = weeklyCandles.length >= 5
+    ? detectBias(weeklyCandles, pipSize) : _BT_NEUTRAL_BIAS;
 
-  // Candlestick patterns
-  const cp      = detectCandlestickPatterns(candles);
-  const shortCp = detectCandlestickPatterns(shortSlice);
+  // 2. Daily trend — group 24 1H bars → daily candles, use last 60
+  const allDailyCandles = _groupCandlesInto(candles, 24, 65);
+  const dailyCandles    = allDailyCandles.length > 60 ? allDailyCandles.slice(-60) : allDailyCandles;
+  const dailyBias       = dailyCandles.length >= 5
+    ? detectBias(dailyCandles, pipSize) : _BT_NEUTRAL_BIAS;
+  const dailyInd        = dailyCandles.length >= 5
+    ? computeIndicators(dailyCandles, pipSize) : null;
+
+  // 3. 4H momentum — group 4 1H bars → 4H candles, use last 120
+  const allH4Candles = _groupCandlesInto(candles, 4, 125);
+  const h4Candles    = allH4Candles.length > 120 ? allH4Candles.slice(-120) : allH4Candles;
+  const h4Bias       = h4Candles.length >= 5
+    ? detectBias(h4Candles, pipSize) : _BT_NEUTRAL_BIAS;
+  const h4Ind        = h4Candles.length >= 5
+    ? computeIndicators(h4Candles, pipSize) : null;
+
+  // 4. 2H momentum — group 2 1H bars → 2H candles, use last 48
+  const allH2Candles = _groupCandlesInto(candles, 2, 50);
+  const h2Candles    = allH2Candles.length > 48 ? allH2Candles.slice(-48) : allH2Candles;
+  const h2Bias       = h2Candles.length >= 5
+    ? detectBias(h2Candles, pipSize) : _BT_NEUTRAL_BIAS;
+
+  // 5. 1H entry timing — raw 1H bars, last 24
+  const h1Slice    = candles.length > 24 ? candles.slice(-24) : candles;
+  const h1EntryBias = h1Slice.length >= 5
+    ? detectBias(h1Slice, pipSize) : _BT_NEUTRAL_BIAS;
+
+  // Supply/demand zones at weekly, daily, and 4H horizons
+  const weeklyZones = weeklyCandles.length >= 5 ? detectZones(weeklyCandles, pipSize) : _BT_EMPTY_ZONES;
+  const dailyZones  = dailyCandles.length  >= 5 ? detectZones(dailyCandles,  pipSize) : _BT_EMPTY_ZONES;
+  const h4Zones     = h4Candles.length     >= 5 ? detectZones(h4Candles,     pipSize) : _BT_EMPTY_ZONES;
+
+  // Head & Shoulders patterns at weekly, daily, and 4H
+  const weeklyHs = weeklyCandles.length >= 10 ? detectHeadAndShoulders(weeklyCandles) : _BT_NO_HS;
+  const dailyHs  = dailyCandles.length  >= 10 ? detectHeadAndShoulders(dailyCandles)  : _BT_NO_HS;
+  const h4Hs     = h4Candles.length     >= 10 ? detectHeadAndShoulders(h4Candles)     : _BT_NO_HS;
+
+  // Candlestick patterns at daily, 4H, and 2H (most actionable for entry timing)
+  const dailyCp = dailyCandles.length >= 5 ? detectCandlestickPatterns(dailyCandles) : [];
+  const h4Cp    = h4Candles.length    >= 5 ? detectCandlestickPatterns(h4Candles)    : [];
+  const h2Cp    = h2Candles.length    >= 5 ? detectCandlestickPatterns(h2Candles)    : [];
 
   const conf = calcConfidenceScore(
-    // Proper multi-TF hierarchy: monthly → weekly → medium → short → recent
-    { weekly: monthlyBias, daily: weeklyBias, h4: medBias, h2: shortBias, h1: recentBias, m30: _BT_NEUTRAL_BIAS },
-    { weekly: longZones,   daily: medZones,   h4: shortZones },
-    { weekly: _BT_NO_HS,   daily: hs,         h4: shortHs },
-    { daily: cp,           h4: shortCp,       h2: [] },
-    { daily: medInd || ind, h4: shortInd,     h2: null, h1: null, m30: null },
+    // Map genuine 1H hierarchy into scoring engine slots
+    { weekly: weeklyBias, daily: dailyBias, h4: h4Bias, h2: h2Bias, h1: h1EntryBias, m30: _BT_NEUTRAL_BIAS },
+    { weekly: weeklyZones, daily: dailyZones, h4: h4Zones },
+    { weekly: weeklyHs,    daily: dailyHs,    h4: h4Hs },
+    { daily: dailyCp, h4: h4Cp, h2: h2Cp },
+    { daily: dailyInd || ind, h4: h4Ind, h2: null, h1: null, m30: null },
     currentPrice, pipSize
   );
 
   return {
     ...conf,
-    atr:            ind.atr,
-    ema200:         ind.ema200,
-    monthlyBias:    monthlyBias.bias,
-    weeklyBias:     weeklyBias.bias,
-    medBias:        medBias.bias,
-    shortBias:      shortBias.bias,
-    recentBias:     recentBias.bias,
-    dailyRsi:       medInd ? medInd.rsi       : ind.rsi,
-    dailyMacdHist:  medInd ? medInd.histogram : ind.histogram,
+    atr:    ind.atr,
+    ema200: ind.ema200,  // 1H EMA200 (≈200-hour moving average) used for trend filter
+    // Legacy field names preserved so _walkForward filters work without changes:
+    //   monthlyBias → weekly macro context
+    //   weeklyBias  → daily trend context
+    //   medBias     → 4H momentum
+    //   shortBias   → 2H momentum
+    //   recentBias  → 1H entry timing
+    monthlyBias:   weeklyBias.bias,
+    weeklyBias:    dailyBias.bias,
+    medBias:       h4Bias.bias,
+    shortBias:     h2Bias.bias,
+    recentBias:    h1EntryBias.bias,
+    dailyRsi:      h4Ind ? h4Ind.rsi       : ind.rsi,
+    dailyMacdHist: h4Ind ? h4Ind.histogram : ind.histogram,
   };
 }
 
@@ -416,7 +424,7 @@ function _walkForward(candles, pipSize) {
           ).length;
           const tfConsensusOK = !BT.MIN_TF_CONSENSUS || agreeingTFs >= BT.MIN_TF_CONSENSUS;
 
-          // Trend TF alignment: require monthly + weekly + medium all agree
+          // Trend TF alignment: require weekly macro + daily + 4H all agree
           const trendAlignOK = !BT.REQUIRE_TREND_ALIGN ||
             biases.slice(0, 3).every(b =>
               (direction === 'LONG'  && b === 'BULLISH') ||
@@ -445,7 +453,7 @@ function _walkForward(candles, pipSize) {
               : barClose <= barOpen;
           }
 
-          // Monthly strict: monthly bias must explicitly confirm (not just non-opposing)
+          // Weekly macro strict: weekly macro bias must explicitly confirm (not just non-opposing)
           const monthlyStrictOK = !BT.MONTHLY_STRICT ||
             (direction === 'LONG'  && sig.monthlyBias === 'BULLISH') ||
             (direction === 'SHORT' && sig.monthlyBias === 'BEARISH');
@@ -526,8 +534,9 @@ function _btStats(trades) {
   const avgLoss      = losses.length ? grossLoss / losses.length : 0;
 
   /* Composite score 0–100 */
-  // Scale pip target with backtest window: ~1.5 pips/day is a solid target
-  const pipTarget = Math.max(200, Math.round(BT.BT_WINDOW_DAYS * 1.5));
+  // Scale pip target with backtest window: ~0.1 pips/1H bar is a solid target
+  // (~12 pips/day × 5 days = ~60 pips/week for the 1H timeframe)
+  const pipTarget = Math.max(50, Math.round(BT.BT_WINDOW_DAYS * 0.1));
   const wrPts  = Math.min(winRate / 0.60, 1) * 100 * 0.40;
   const pfPts  = Math.min(profitFactor / 2, 1) * 100 * 0.30;
   const pipPts = totalPips > 0 ? Math.min(totalPips / pipTarget, 1) * 100 * 0.30 : 0;
@@ -554,12 +563,12 @@ function _btStats(trades) {
 async function runBacktest(f, t) {
   _updateBTState(); // Sync global BT object with UI settings
   const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
-  // Fetch up to 2 years so EMA200 (200-bar warmup) is properly initialised,
+  // Fetch up to 2 years of 1H bars so indicator warmup is properly initialised,
   // but trades are only taken in the last BT.BT_WINDOW_DAYS bars.
-  const candles = await fetchYahooFinanceChart(f, t, '1D');
+  const candles = await fetchYahooFinanceChart(f, t, 'BT_1H');
 
   if (!candles || candles.length < BT.WARMUP + 10) {
-    return { error: `Need ≥ ${BT.WARMUP + 10} daily bars; got ${candles ? candles.length : 0}` };
+    return { error: `Need ≥ ${BT.WARMUP + 10} 1-hour bars; got ${candles ? candles.length : 0}` };
   }
 
   const btWindowStart = Math.max(BT.WARMUP, candles.length - BT.BT_WINDOW_DAYS);
@@ -650,11 +659,11 @@ function _buildBacktestResult(result, f, t) {
   const scoreLabel = _btScoreLabel(profitabilityScore);
   const curveSvg = _drawEquityCurve(equityCurve);
 
-  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
-                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
-                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
-                    : '~3mo';
-  const settingsDesc = `min score ${BT.MIN_SCORE} · ${windowLabel} window` +
+  const windowLabel = BT.BT_WINDOW_DAYS >= 3120 ? '~6mo'
+                    : BT.BT_WINDOW_DAYS >= 1560 ? '~3mo'
+                    : BT.BT_WINDOW_DAYS >= 520  ? '~1mo'
+                    :                             '~2wk';
+  const settingsDesc = `min score ${BT.MIN_SCORE} · ${windowLabel} window (1H)` +
     (BT.USE_TREND_FILTER      ? ' · trend filter'     : '') +
     (BT.REQUIRE_WEEKLY_ALIGN  ? ' · weekly req.'      : '') +
     (BT.REQUIRE_STRONG_SIGNAL ? ' · strong only'      : '') +
@@ -732,7 +741,7 @@ function _buildBacktestResult(result, f, t) {
       <div class="bt-metric"><span class="bt-m-lbl">Avg Win / Loss</span><span class="bt-m-val">${avgWin} / ${avgLoss}</span><span class="bt-m-sub">pips per trade</span></div>
     </div>
     <div class="bt-trade-chart-wrap">
-      <div class="bt-curve-label">Trade Chart — daily candles with entries &amp; exits</div>
+      <div class="bt-curve-label">Trade Chart — 1H candles with entries &amp; exits</div>
       <div class="bt-chart-legend">
         <span class="bt-leg bt-leg-entry-long">▲ Long entry</span>
         <span class="bt-leg bt-leg-entry-short">▼ Short entry</span>
@@ -874,6 +883,17 @@ function _updateBTState() {
     BT.MOVE_SL_AT_PARTIAL     = _getBTSavedSetting('move_sl_at_partial',     BT_DEFAULTS.MOVE_SL_AT_PARTIAL);
     BT.SCALE_IN               = _getBTSavedSetting('scale_in',               BT_DEFAULTS.SCALE_IN);
     BT.SCORE_WEIGHT_RISK      = _getBTSavedSetting('score_weight_risk',      BT_DEFAULTS.SCORE_WEIGHT_RISK);
+
+    // ── Migrate old daily-scale settings to 1H scale ─────────────────────────
+    // If saved window_days is one of the old daily values (≤500 and not a valid
+    // 1H option), reset it to the 1H default so the backtest window is meaningful.
+    if (![240, 520, 1560, 3120].includes(BT.BT_WINDOW_DAYS)) {
+      BT.BT_WINDOW_DAYS = BT_DEFAULTS.BT_WINDOW_DAYS;
+    }
+    // If saved max_hold_days is below minimum valid 1H value, reset it.
+    if (BT.MAX_HOLD_DAYS < 24) {
+      BT.MAX_HOLD_DAYS = BT_DEFAULTS.MAX_HOLD_DAYS;
+    }
 }
 
 function _onBTSettingChange(key, val) {
@@ -940,12 +960,16 @@ function _applySettingsFromJSON(jsonText) {
     atrStopLossMultiplier:      { lsKey: 'atr_sl',               type: 'number' },
     riskRewardRatio:            { lsKey: 'rr',                   type: 'number' },
     ema200TrendFilter:          { lsKey: 'use_trend_filter',      type: 'boolean' },
+    // Accept both old (requireWeeklyAlign) and new (requireDailyAlign) key names
+    requireDailyAlign:          { lsKey: 'require_weekly_align',  type: 'boolean' },
     requireWeeklyAlign:         { lsKey: 'require_weekly_align',  type: 'boolean' },
     requireStrongSignal:        { lsKey: 'require_strong_signal', type: 'boolean' },
     rsiFilter:                  { lsKey: 'rsi_filter',            type: 'string' },
     macdConfirmation:           { lsKey: 'macd_confirm',          type: 'boolean' },
     breakevenTriggerRR:         { lsKey: 'breakeven_trigger_rr',  type: 'number' },
     reversalExitScore:          { lsKey: 'reversal_exit_score',   type: 'number' },
+    // Accept both old (safetyCapDays) and new (safetyCapBars) key names
+    safetyCapBars:              { lsKey: 'max_hold_days',         type: 'number' },
     safetyCapDays:              { lsKey: 'max_hold_days',         type: 'number' },
     scoreConsistencyBars:       { lsKey: 'score_consistency',     type: 'number' },
     volatilityFilter:           { lsKey: 'use_volatility_filter', type: 'boolean' },
@@ -955,6 +979,8 @@ function _applySettingsFromJSON(jsonText) {
     requireTrendTimeframeAlign: { lsKey: 'require_trend_align',   type: 'boolean' },
     emaSlopeFilter:             { lsKey: 'ema_slope_filter',      type: 'boolean' },
     candleConfirmation:         { lsKey: 'candle_confirm',        type: 'boolean' },
+    // Accept both old (monthlyBiasStrict) and new (weeklyMacroStrict) key names
+    weeklyMacroStrict:          { lsKey: 'monthly_strict',        type: 'boolean' },
     monthlyBiasStrict:          { lsKey: 'monthly_strict',        type: 'boolean' },
     scaleIn:                    { lsKey: 'scale_in',              type: 'boolean' },
     scoreWeightedRisk:          { lsKey: 'score_weight_risk',     type: 'boolean' },
@@ -962,10 +988,10 @@ function _applySettingsFromJSON(jsonText) {
 
   let applied = 0;
 
-  // Handle backtest window (stored as string like "365 trading days" or plain number)
-  if (s.backtestWindow != null) {
-    const raw = String(s.backtestWindow);
-    const num = parseInt(raw, 10);
+  // Handle backtest window (plain number, "1560 1h bars", or legacy "365 trading days")
+  const btWindowRaw = s.backtestWindow1HBars ?? s.backtestWindowDays ?? s.backtestWindow;
+  if (btWindowRaw != null) {
+    const num = parseInt(String(btWindowRaw), 10);
     if (!isNaN(num)) { localStorage.setItem('bt_window_days', num); applied++; }
   }
 
@@ -1068,9 +1094,9 @@ function _buildSettingsJSON() {
     minConfidenceScore:         BT.MIN_SCORE,
     atrStopLossMultiplier:      BT.ATR_SL,
     riskRewardRatio:            BT.RR,
-    backtestWindowDays:         BT.BT_WINDOW_DAYS,
+    backtestWindow1HBars:       BT.BT_WINDOW_DAYS,
     ema200TrendFilter:          BT.USE_TREND_FILTER,
-    requireWeeklyAlign:         BT.REQUIRE_WEEKLY_ALIGN,
+    requireDailyAlign:          BT.REQUIRE_WEEKLY_ALIGN,
     requireStrongSignal:        BT.REQUIRE_STRONG_SIGNAL,
     rsiFilter:                  BT.RSI_FILTER,
     macdConfirmation:           BT.MACD_CONFIRM,
@@ -1078,7 +1104,7 @@ function _buildSettingsJSON() {
                                   ? { factor: BT.TSL_FACTOR, triggerRR: BT.TSL_TRIGGER_RR } : false,
     breakevenTriggerRR:         BT.BREAKEVEN_TRIGGER_RR,
     reversalExitScore:          BT.REVERSAL_EXIT_SCORE,
-    safetyCapDays:              BT.MAX_HOLD_DAYS,
+    safetyCapBars:              BT.MAX_HOLD_DAYS,
     scoreConsistencyBars:       BT.SCORE_CONSISTENCY,
     volatilityFilter:           BT.USE_VOLATILITY_FILTER,
     partialTakeProfit:          BT.PARTIAL_TP
@@ -1089,7 +1115,7 @@ function _buildSettingsJSON() {
     requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
     emaSlopeFilter:             BT.EMA_SLOPE_FILTER,
     candleConfirmation:         BT.CANDLE_CONFIRM,
-    monthlyBiasStrict:          BT.MONTHLY_STRICT,
+    weeklyMacroStrict:          BT.MONTHLY_STRICT,
     scaleIn:                    BT.SCALE_IN,
     scoreWeightedRisk:          BT.SCORE_WEIGHT_RISK,
   };
@@ -1117,13 +1143,13 @@ ${statsJSON}
 \`\`\`
 
 ## Strategy Context
-- This is a daily-candle walk-forward backtest with a 5-level multi-timeframe hierarchy (monthly macro → weekly → 60d momentum → 20d short-term → 10d entry timing).
-- Entry: confluence score must exceed minConfidenceScore, filtered by selected gates (EMA200, RSI, MACD, etc.).
-- Exit: intelligent — breakeven management, optional trailing stop, signal reversal detection, time safety cap.
-- "partialTakeProfit" closes a portion of the position early to lock in profits while letting the remainder run.
-- "minTfConsensus" requires N of the 5 timeframes to explicitly agree with the trade direction.
-- "requireTrendTimeframeAlign" means monthly + weekly + medium-term must ALL point the same way.
-- "emaSlopeFilter" requires EMA200 to be sloping in the trade direction (20-bar comparison).
+- This is a 1-hour candle walk-forward backtest with a genuine 5-level multi-timeframe hierarchy (weekly macro → daily → 4H momentum → 2H momentum → 1H entry timing). Targets 1–5 trades per week.
+- Entry: confluence score must exceed minConfidenceScore, filtered by selected gates (1H EMA200, RSI on 4H, MACD, etc.).
+- Exit: intelligent — breakeven management, optional trailing stop, signal reversal detection, safety cap (in 1H bars).
+- "safetyCapBars" = max bars held (120 = 5 trading days). "partialTakeProfit" closes part of the position early.
+- "minTfConsensus" requires N of the 5 timeframes (weekly/daily/4H/2H/1H) to explicitly agree with direction.
+- "requireTrendTimeframeAlign" means weekly macro + daily + 4H must ALL point the same way.
+- "emaSlopeFilter" requires 1H EMA200 to be sloping in the trade direction (20-bar comparison).
 - "candleConfirmation" requires the signal bar to close in the trade direction.
 - "scoreWeightedRisk" scales pip weight by signal strength (stronger signal = 1.5× weight).
 
@@ -1144,16 +1170,16 @@ Return ONLY the optimised JSON object (no extra text), in exactly this format so
   "minConfidenceScore": ...,
   "atrStopLossMultiplier": ...,
   "riskRewardRatio": ...,
-  "backtestWindowDays": ...,
+  "backtestWindow1HBars": ...,
   "ema200TrendFilter": ...,
-  "requireWeeklyAlign": ...,
+  "requireDailyAlign": ...,
   "requireStrongSignal": ...,
   "rsiFilter": "OFF|NORMAL|STRICT",
   "macdConfirmation": ...,
   "trailingStop": false | { "factor": ..., "triggerRR": ... },
   "breakevenTriggerRR": ...,
   "reversalExitScore": ...,
-  "safetyCapDays": ...,
+  "safetyCapBars": ...,
   "scoreConsistencyBars": ...,
   "volatilityFilter": ...,
   "partialTakeProfit": false | { "triggerRR": ..., "closePercent": ..., "moveSLToBreakeven": ... },
@@ -1163,7 +1189,7 @@ Return ONLY the optimised JSON object (no extra text), in exactly this format so
   "requireTrendTimeframeAlign": ...,
   "emaSlopeFilter": ...,
   "candleConfirmation": ...,
-  "monthlyBiasStrict": ...,
+  "weeklyMacroStrict": ...,
   "scaleIn": ...,
   "scoreWeightedRisk": ...
 }
@@ -1222,12 +1248,13 @@ ${JSON.stringify(pairsData, null, 2)}
 \`\`\`
 
 ## Strategy Context
-- Daily-candle walk-forward backtest with 5-level multi-timeframe hierarchy.
-- Entry confluence score + filter gates. Exit: breakeven, trailing stop, reversal detection, time cap.
-- "minTfConsensus" = how many of 5 timeframes must agree (0 = off, 3 = balanced, 5 = maximum).
-- "requireTrendTimeframeAlign" = monthly + weekly + medium all must point same direction.
+- 1-hour candle walk-forward backtest with genuine 5-level multi-timeframe hierarchy (weekly macro → daily → 4H → 2H → 1H). Targets 1–5 trades per week.
+- Entry confluence score + filter gates. Exit: breakeven, trailing stop, reversal detection, safety cap (1H bars).
+- "safetyCapBars" = max bars held (120 = 5 trading days, 24 = 1 day).
+- "minTfConsensus" = how many of 5 TFs (weekly/daily/4H/2H/1H) must agree (0 = off, 3 = balanced, 5 = max).
+- "requireTrendTimeframeAlign" = weekly macro + daily + 4H must ALL point same direction.
 - "partialTakeProfit" = close a portion early to lock in gains while remainder runs to target.
-- "emaSlopeFilter" = EMA200 must be sloping in trade direction.
+- "emaSlopeFilter" = 1H EMA200 must be sloping in trade direction.
 - "scoreWeightedRisk" = stronger signals get higher pip weight (up to 1.5×).
 
 ## Your Task
@@ -1245,16 +1272,16 @@ Return ONLY the optimised JSON object (no extra text before it), in exactly this
   "minConfidenceScore": ...,
   "atrStopLossMultiplier": ...,
   "riskRewardRatio": ...,
-  "backtestWindowDays": ...,
+  "backtestWindow1HBars": ...,
   "ema200TrendFilter": ...,
-  "requireWeeklyAlign": ...,
+  "requireDailyAlign": ...,
   "requireStrongSignal": ...,
   "rsiFilter": "OFF|NORMAL|STRICT",
   "macdConfirmation": ...,
   "trailingStop": false | { "factor": ..., "triggerRR": ... },
   "breakevenTriggerRR": ...,
   "reversalExitScore": ...,
-  "safetyCapDays": ...,
+  "safetyCapBars": ...,
   "scoreConsistencyBars": ...,
   "volatilityFilter": ...,
   "partialTakeProfit": false | { "triggerRR": ..., "closePercent": ..., "moveSLToBreakeven": ... },
@@ -1264,7 +1291,7 @@ Return ONLY the optimised JSON object (no extra text before it), in exactly this
   "requireTrendTimeframeAlign": ...,
   "emaSlopeFilter": ...,
   "candleConfirmation": ...,
-  "monthlyBiasStrict": ...,
+  "weeklyMacroStrict": ...,
   "scaleIn": ...,
   "scoreWeightedRisk": ...
 }
@@ -1296,22 +1323,21 @@ async function _copyAutoBacktestExport() {
   const result = window._lastAutoResult;
   if (!result) return;
 
-  const windowLabel = BT.BT_WINDOW_DAYS >= 480 ? '~2yr'
-                    : BT.BT_WINDOW_DAYS >= 240 ? '~1yr'
-                    : BT.BT_WINDOW_DAYS >= 120 ? '~6mo'
-                    : BT.BT_WINDOW_DAYS >= 55  ? '~3mo'
-                    :                            '~1mo';
+  const windowLabel = BT.BT_WINDOW_DAYS >= 3120 ? '~6mo'
+                    : BT.BT_WINDOW_DAYS >= 1560 ? '~3mo'
+                    : BT.BT_WINDOW_DAYS >= 520  ? '~1mo'
+                    :                             '~2wk';
 
   const data = {
-    _note: 'All-pairs backtest export — paste into Claude to get strategy analysis, improvement suggestions, and per-pair breakdown.',
+    _note: 'All-pairs 1H backtest export — paste into Claude to get strategy analysis, improvement suggestions, and per-pair breakdown.',
     exportTimestamp: new Date().toISOString(),
     settings: {
-      backtestWindow:            windowLabel + ' (' + BT.BT_WINDOW_DAYS + ' trading days)',
+      backtestWindow:            windowLabel + ' (' + BT.BT_WINDOW_DAYS + ' 1h bars)',
       minConfidenceScore:        BT.MIN_SCORE,
       atrStopLossMultiplier:     BT.ATR_SL,
       riskRewardRatio:           BT.RR,
       ema200TrendFilter:         BT.USE_TREND_FILTER,
-      requireWeeklyAlign:        BT.REQUIRE_WEEKLY_ALIGN,
+      requireDailyAlign:         BT.REQUIRE_WEEKLY_ALIGN,
       requireStrongSignal:       BT.REQUIRE_STRONG_SIGNAL,
       rsiFilter:                 BT.RSI_FILTER,
       macdConfirmation:          BT.MACD_CONFIRM,
@@ -1320,7 +1346,7 @@ async function _copyAutoBacktestExport() {
                                    : false,
       breakevenTriggerRR:        BT.BREAKEVEN_TRIGGER_RR,
       reversalExitScore:         BT.REVERSAL_EXIT_SCORE,
-      safetyCapDays:             BT.MAX_HOLD_DAYS,
+      safetyCapBars:             BT.MAX_HOLD_DAYS,
       scoreConsistencyBars:      BT.SCORE_CONSISTENCY,
       volatilityFilter:          BT.USE_VOLATILITY_FILTER,
       partialTakeProfit:         BT.PARTIAL_TP
@@ -1332,7 +1358,7 @@ async function _copyAutoBacktestExport() {
       requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
       emaSlopeFilter:            BT.EMA_SLOPE_FILTER,
       candleConfirmation:        BT.CANDLE_CONFIRM,
-      monthlyBiasStrict:         BT.MONTHLY_STRICT,
+      weeklyMacroStrict:         BT.MONTHLY_STRICT,
       scaleIn:                   BT.SCALE_IN,
       scoreWeightedRisk:         BT.SCORE_WEIGHT_RISK,
     },
@@ -1534,7 +1560,7 @@ async function runOptimizer(progressCb) {
     if (progressCb) progressCb('fetch', pi, pairs.length, `${f}/${t}`);
     try {
       const pipSize = (f === 'JPY' || t === 'JPY') ? 0.01 : 0.0001;
-      const candles = await fetchYahooFinanceChart(f, t, '1D');
+      const candles = await fetchYahooFinanceChart(f, t, 'BT_1H');
       if (candles && candles.length >= BT.WARMUP + 20) {
         const sigs = _precomputeBtSignals(candles, pipSize);
         pairData.push({ candles, sigs, pipSize });
@@ -1951,12 +1977,12 @@ function _buildExportData(result) {
       signalAtEntry: {
         confidenceScore:    tr.score,
         recommendation:     tr.recommendation,
-        // 5-level TF hierarchy at moment of entry
-        monthlyMacroTrend:  tr.monthlyBias  || 'UNKNOWN',
-        weeklyTrend:        tr.weeklyBias   || 'UNKNOWN',
-        mediumTerm_60d:     tr.medBias      || 'UNKNOWN',
-        shortTerm_20d:      tr.shortBias    || 'UNKNOWN',
-        recentMomentum_10d: tr.recentBias   || 'UNKNOWN',
+        // Genuine 1H 5-level TF hierarchy at moment of entry
+        weeklyMacroTrend:   tr.monthlyBias  || 'UNKNOWN',
+        dailyTrend:         tr.weeklyBias   || 'UNKNOWN',
+        h4Momentum:         tr.medBias      || 'UNKNOWN',
+        h2Momentum:         tr.shortBias    || 'UNKNOWN',
+        h1EntryTiming:      tr.recentBias   || 'UNKNOWN',
         rsi:                tr.rsiAtEntry    != null ? +tr.rsiAtEntry.toFixed(1)    : null,
         atr:                tr.atrAtEntry    != null ? +tr.atrAtEntry.toFixed(pipDigits) : null,
         ema200:             tr.ema200AtEntry != null ? +tr.ema200AtEntry.toFixed(pipDigits) : null,
@@ -1973,17 +1999,17 @@ function _buildExportData(result) {
   });
 
   return {
-    _note: 'Paste this JSON into Claude to get a full strategy assessment, ' +
+    _note: 'Paste this JSON into Claude to get a full 1H-timeframe strategy assessment, ' +
            'improvement suggestions, and trade-by-trade analysis.',
     exportTimestamp: new Date().toISOString(),
     pair:            result.pair,
     settings: {
-      backtestWindow:            BT.BT_WINDOW_DAYS + ' trading days',
+      backtestWindow:            BT.BT_WINDOW_DAYS + ' 1h bars',
       minConfidenceScore:        BT.MIN_SCORE,
       atrStopLossMultiplier:     BT.ATR_SL,
       riskRewardRatio:           BT.RR,
       ema200TrendFilter:         BT.USE_TREND_FILTER,
-      requireWeeklyAlign:        BT.REQUIRE_WEEKLY_ALIGN,
+      requireDailyAlign:         BT.REQUIRE_WEEKLY_ALIGN,
       requireStrongSignal:       BT.REQUIRE_STRONG_SIGNAL,
       rsiFilter:                 BT.RSI_FILTER,
       macdConfirmation:          BT.MACD_CONFIRM,
@@ -1992,7 +2018,7 @@ function _buildExportData(result) {
                                    : false,
       breakevenTriggerRR:        BT.BREAKEVEN_TRIGGER_RR,
       reversalExitScore:         BT.REVERSAL_EXIT_SCORE,
-      safetyCapDays:             BT.MAX_HOLD_DAYS,
+      safetyCapBars:             BT.MAX_HOLD_DAYS,
       scoreConsistencyBars:      BT.SCORE_CONSISTENCY,
       volatilityFilter:          BT.USE_VOLATILITY_FILTER,
       partialTakeProfit:         BT.PARTIAL_TP
@@ -2004,7 +2030,7 @@ function _buildExportData(result) {
       requireTrendTimeframeAlign: BT.REQUIRE_TREND_ALIGN,
       emaSlopeFilter:            BT.EMA_SLOPE_FILTER,
       candleConfirmation:        BT.CANDLE_CONFIRM,
-      monthlyBiasStrict:         BT.MONTHLY_STRICT,
+      weeklyMacroStrict:         BT.MONTHLY_STRICT,
       scaleIn:                   BT.SCALE_IN,
       scoreWeightedRisk:         BT.SCORE_WEIGHT_RISK,
     },
@@ -2075,7 +2101,7 @@ function appendBacktestSection(panel, f, t) {
       </div>
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-atr-sl">ATR Stop-Loss Multiplier
-          <span class="bt-setting-hint">Wider stop to survive daily volatility</span>
+          <span class="bt-setting-hint">Stop-loss distance = 1H ATR × this multiplier</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="range" id="bt-atr-sl" min="1.0" max="5.0" value="${BT.ATR_SL}" step="0.5" oninput="_onBTSettingChange('atr_sl', this.value)">
@@ -2130,15 +2156,14 @@ function appendBacktestSection(panel, f, t) {
 
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-window-days">Backtest Period
-          <span class="bt-setting-hint">How many recent trading days to simulate (uses up to 5yr of history)</span>
+          <span class="bt-setting-hint">How many 1H bars to simulate (~120 bars = 1 week; uses up to 2yr of hourly history)</span>
         </label>
         <div class="bt-setting-ctrl">
           <select id="bt-window-days" class="bt-select" onchange="_onBTSettingChange('window_days', this.value)">
-            <option value="30"  ${BT.BT_WINDOW_DAYS === 30  ? 'selected' : ''}>1 month (~30 days)</option>
-            <option value="66"  ${BT.BT_WINDOW_DAYS === 66  ? 'selected' : ''}>3 months (~66 days)</option>
-            <option value="130" ${BT.BT_WINDOW_DAYS === 130 ? 'selected' : ''}>6 months (~130 days)</option>
-            <option value="365" ${BT.BT_WINDOW_DAYS === 365 ? 'selected' : ''}>1 year (~365 days)</option>
-            <option value="500" ${BT.BT_WINDOW_DAYS === 500 ? 'selected' : ''}>2 years (~500 days)</option>
+            <option value="240"  ${BT.BT_WINDOW_DAYS === 240  ? 'selected' : ''}>2 weeks (~240 bars)</option>
+            <option value="520"  ${BT.BT_WINDOW_DAYS === 520  ? 'selected' : ''}>1 month (~520 bars)</option>
+            <option value="1560" ${BT.BT_WINDOW_DAYS === 1560 ? 'selected' : ''}>3 months (~1560 bars)</option>
+            <option value="3120" ${BT.BT_WINDOW_DAYS === 3120 ? 'selected' : ''}>6 months (~3120 bars)</option>
           </select>
         </div>
       </div>
@@ -2161,11 +2186,11 @@ function appendBacktestSection(panel, f, t) {
         </div>
       </div>
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-max-hold-days">Safety Cap (days)
-          <span class="bt-setting-hint">Last-resort close if the bot hasn't exited by signal, SL, TP, or breakeven after this many bars</span>
+        <label class="bt-setting-label" for="bt-max-hold-days">Safety Cap (1H bars)
+          <span class="bt-setting-hint">Last-resort close if no signal/SL/TP exit after this many 1H bars (24 = 1 day, 120 = 5 days)</span>
         </label>
         <div class="bt-setting-ctrl">
-          <input type="range" id="bt-max-hold-days" min="7" max="120" value="${BT.MAX_HOLD_DAYS}" step="7" oninput="_onBTSettingChange('max_hold_days', this.value)">
+          <input type="range" id="bt-max-hold-days" min="24" max="240" value="${BT.MAX_HOLD_DAYS}" step="24" oninput="_onBTSettingChange('max_hold_days', this.value)">
           <span id="bt-max-hold-days-val" class="bt-range-val">${BT.MAX_HOLD_DAYS}</span>
         </div>
       </div>
@@ -2173,8 +2198,8 @@ function appendBacktestSection(panel, f, t) {
       <div class="bt-setting-divider">Advanced Entry Filters</div>
 
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-require-weekly-align">Require Weekly Alignment
-          <span class="bt-setting-hint">Block trades when weekly trend is unclear (NEUTRAL)</span>
+        <label class="bt-setting-label" for="bt-require-weekly-align">Require Daily Alignment
+          <span class="bt-setting-hint">Block trades when the daily-context trend is unclear (NEUTRAL)</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="checkbox" id="bt-require-weekly-align" ${BT.REQUIRE_WEEKLY_ALIGN ? 'checked' : ''} onchange="_onBTSettingChange('require_weekly_align', this.checked)">
@@ -2233,7 +2258,7 @@ function appendBacktestSection(panel, f, t) {
 
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-min-tf-consensus">Min TF Consensus
-          <span class="bt-setting-hint">Require at least N of the 5 timeframes (monthly/weekly/medium/short/recent) to explicitly agree with direction. 0 = off, 3 = balanced quality gate, 5 = maximum confluence.</span>
+          <span class="bt-setting-hint">Require at least N of the 5 timeframes (weekly/daily/4H/2H/1H) to explicitly agree with direction. 0 = off, 3 = balanced quality gate, 5 = maximum confluence.</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="range" id="bt-min-tf-consensus" min="0" max="5" value="${BT.MIN_TF_CONSENSUS}" step="1" oninput="_onBTSettingChange('min_tf_consensus', this.value)">
@@ -2242,15 +2267,15 @@ function appendBacktestSection(panel, f, t) {
       </div>
       <div class="bt-setting-row">
         <label class="bt-setting-label" for="bt-require-trend-align">Require Trend TF Alignment
-          <span class="bt-setting-hint">Monthly + weekly + medium-term must ALL point in the same direction — the strongest trend confluence gate available.</span>
+          <span class="bt-setting-hint">Weekly macro + daily + 4H must ALL point in the same direction — the strongest trend confluence gate available.</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="checkbox" id="bt-require-trend-align" ${BT.REQUIRE_TREND_ALIGN ? 'checked' : ''} onchange="_onBTSettingChange('require_trend_align', this.checked)">
         </div>
       </div>
       <div class="bt-setting-row">
-        <label class="bt-setting-label" for="bt-monthly-strict">Monthly Bias Strict
-          <span class="bt-setting-hint">Monthly timeframe must explicitly confirm direction (BULLISH for longs, BEARISH for shorts) — stricter than the default which merely blocks opposing signals.</span>
+        <label class="bt-setting-label" for="bt-monthly-strict">Weekly Macro Strict
+          <span class="bt-setting-hint">Weekly macro context must explicitly confirm direction (BULLISH for longs, BEARISH for shorts) — stricter than the default which merely blocks opposing signals.</span>
         </label>
         <div class="bt-setting-ctrl">
           <input type="checkbox" id="bt-monthly-strict" ${BT.MONTHLY_STRICT ? 'checked' : ''} onchange="_onBTSettingChange('monthly_strict', this.checked)">
