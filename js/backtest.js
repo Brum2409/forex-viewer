@@ -271,16 +271,18 @@ function _walkForward(candles, pipSize) {
       }
 
       // 2. Trailing stop
-      if (!exitPrice && BT.USE_TRAILING_STOP && sig && sig.atr) {
+      // Use ATR at entry (not current bar ATR) so the trail width stays proportional
+      // to the original risk and doesn't widen on volatile bars post-entry.
+      if (!exitPrice && BT.USE_TRAILING_STOP && position.atrAtEntry) {
         if (position.direction === 'LONG') {
           const triggerPrice = position.entry + slDist * BT.TSL_TRIGGER_RR;
           if (hi > triggerPrice) {
-            position.sl = Math.max(position.sl, hi - sig.atr * BT.TSL_FACTOR);
+            position.sl = Math.max(position.sl, hi - position.atrAtEntry * BT.TSL_FACTOR);
           }
         } else {
           const triggerPrice = position.entry - slDist * BT.TSL_TRIGGER_RR;
           if (lo < triggerPrice) {
-            position.sl = Math.min(position.sl, lo + sig.atr * BT.TSL_FACTOR);
+            position.sl = Math.min(position.sl, lo + position.atrAtEntry * BT.TSL_FACTOR);
           }
         }
       }
@@ -303,13 +305,28 @@ function _walkForward(candles, pipSize) {
       }
 
       // 5. SL / TP check
+      // When a single candle spans both SL and TP (common after breakeven moves SL to entry),
+      // use the bar open to infer which level was likely hit first:
+      //   - Opened on the profit side of entry → TP was likely hit first
+      //   - Opened on the loss side of entry   → SL was likely hit first
       if (!exitPrice) {
+        const barOpen = next.open ?? next.rate;
         if (position.direction === 'LONG') {
-          if (lo  <= position.sl)     { exitPrice = position.sl; exitType = 'SL'; }
-          else if (hi >= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
+          const tpHit = hi >= position.tp;
+          const slHit = lo <= position.sl;
+          if (tpHit && slHit) {
+            if (barOpen >= position.entry) { exitPrice = position.tp; exitType = 'TP'; }
+            else                           { exitPrice = position.sl; exitType = 'SL'; }
+          } else if (tpHit) { exitPrice = position.tp; exitType = 'TP'; }
+          else if (slHit)   { exitPrice = position.sl; exitType = 'SL'; }
         } else {
-          if (hi >= position.sl)      { exitPrice = position.sl; exitType = 'SL'; }
-          else if (lo <= position.tp) { exitPrice = position.tp; exitType = 'TP'; }
+          const tpHit = lo <= position.tp;
+          const slHit = hi >= position.sl;
+          if (tpHit && slHit) {
+            if (barOpen <= position.entry) { exitPrice = position.tp; exitType = 'TP'; }
+            else                           { exitPrice = position.sl; exitType = 'SL'; }
+          } else if (tpHit) { exitPrice = position.tp; exitType = 'TP'; }
+          else if (slHit)   { exitPrice = position.sl; exitType = 'SL'; }
         }
       }
 
