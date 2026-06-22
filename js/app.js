@@ -16,6 +16,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: null,          // logged-in username, or null
   cloud: false,        // true once a save has synced to the server
+  cloudProbing: false, // guards the background cloud-reconnect probe
   symbols: [],         // current watchlist
   quotes: new Map(),   // symbol -> quote object
   active: null,        // symbol shown in detail sheet
@@ -80,6 +81,7 @@ function save() {
 
 async function saveCloud() {
   if (!state.user) return;
+  const wasCloud = state.cloud;
   try {
     const res = await fetch("/api/account", {
       method: "PUT",
@@ -93,6 +95,28 @@ async function saveCloud() {
     }
   } catch (_) {
     /* offline — local copy is already saved */
+  }
+  if (state.cloud !== wasCloud) renderUser(); // refresh the sync label
+}
+
+// If we logged in while cloud storage was unavailable (503/offline), keep
+// probing in the background so sync resumes automatically the moment the store
+// comes online — no page reload needed. On success we push the watchlist we
+// built locally so subsequent edits sync from here on.
+async function reconnectCloud() {
+  if (state.cloud || !state.user || state.cloudProbing) return;
+  state.cloudProbing = true;
+  try {
+    const res = await fetch(`/api/account?user=${encodeURIComponent(state.user)}`);
+    if (res.ok) {
+      state.cloud = true;
+      renderUser();
+      saveCloud(); // push the locally-built list so edits start syncing
+    }
+  } catch (_) {
+    /* still offline — try again on the next refresh cycle */
+  } finally {
+    state.cloudProbing = false;
   }
 }
 
@@ -1284,6 +1308,8 @@ async function refresh(manual) {
   } finally {
     if (manual) setTimeout(() => btn.classList.remove("refreshing"), 600);
   }
+  // Piggyback on the refresh cadence (and focus refreshes) to retry cloud sync.
+  if (!state.cloud && state.user) reconnectCloud();
 }
 
 /* ── helpers ─────────────────────────────── */
