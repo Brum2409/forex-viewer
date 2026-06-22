@@ -117,58 +117,56 @@
             </div>
           </div>
 
-          <div class="filter-row">
-            <label for="fRegion">Country / market</label>
-            <select id="fRegion">
-              <option value="us" selected>🇺🇸 United States</option>
-              <option value="any">🌍 Any major market</option>
-              <option value="gb">🇬🇧 United Kingdom</option>
-              <option value="de">🇩🇪 Germany</option>
-              <option value="fr">🇫🇷 France</option>
-              <option value="ca">🇨🇦 Canada</option>
-              <option value="jp">🇯🇵 Japan</option>
-              <option value="cn">🇨🇳 China</option>
-              <option value="hk">🇭🇰 Hong Kong</option>
-              <option value="in">🇮🇳 India</option>
-              <option value="au">🇦🇺 Australia</option>
-              <option value="nl">🇳🇱 Netherlands</option>
-              <option value="ch">🇨🇭 Switzerland</option>
-              <option value="br">🇧🇷 Brazil</option>
-              <option value="kr">🇰🇷 South Korea</option>
-              <option value="es">🇪🇸 Spain</option>
-              <option value="it">🇮🇹 Italy</option>
-              <option value="se">🇸🇪 Sweden</option>
-            </select>
+          <div class="filter-row col">
+            <label>Country / market <span class="hint">(pick any number)</span></label>
+            <div class="chip-group" id="regionGroup">
+              <button type="button" class="chip active" data-region="us">🇺🇸 United States</button>
+              <button type="button" class="chip" data-region="any">🌍 Any major market</button>
+              <button type="button" class="chip" data-region="gb">🇬🇧 United Kingdom</button>
+              <button type="button" class="chip" data-region="de">🇩🇪 Germany</button>
+              <button type="button" class="chip" data-region="fr">🇫🇷 France</button>
+              <button type="button" class="chip" data-region="ca">🇨🇦 Canada</button>
+              <button type="button" class="chip" data-region="jp">🇯🇵 Japan</button>
+              <button type="button" class="chip" data-region="cn">🇨🇳 China</button>
+              <button type="button" class="chip" data-region="hk">🇭🇰 Hong Kong</button>
+              <button type="button" class="chip" data-region="in">🇮🇳 India</button>
+              <button type="button" class="chip" data-region="au">🇦🇺 Australia</button>
+              <button type="button" class="chip" data-region="nl">🇳🇱 Netherlands</button>
+              <button type="button" class="chip" data-region="ch">🇨🇭 Switzerland</button>
+              <button type="button" class="chip" data-region="br">🇧🇷 Brazil</button>
+              <button type="button" class="chip" data-region="kr">🇰🇷 South Korea</button>
+              <button type="button" class="chip" data-region="es">🇪🇸 Spain</button>
+              <button type="button" class="chip" data-region="it">🇮🇹 Italy</button>
+              <button type="button" class="chip" data-region="se">🇸🇪 Sweden</button>
+            </div>
           </div>
 
-          <div class="filter-row" id="sectorRow">
-            <label for="fSector">Sector</label>
-            <select id="fSector">
-              <option value="">Any sector</option>
-              <option value="Technology">Technology</option>
-              <option value="Healthcare">Healthcare</option>
-              <option value="Financial Services">Financial Services</option>
-              <option value="Consumer Cyclical">Consumer Cyclical</option>
-              <option value="Consumer Defensive">Consumer Defensive</option>
-              <option value="Communication Services">Communication Services</option>
-              <option value="Industrials">Industrials</option>
-              <option value="Energy">Energy</option>
-              <option value="Basic Materials">Basic Materials</option>
-              <option value="Real Estate">Real Estate</option>
-              <option value="Utilities">Utilities</option>
-            </select>
+          <div class="filter-row col" id="sectorRow">
+            <label>Sector <span class="hint">(pick any number)</span></label>
+            <div class="chip-group" id="sectorGroup">
+              <button type="button" class="chip" data-sector="Technology">Technology</button>
+              <button type="button" class="chip" data-sector="Healthcare">Healthcare</button>
+              <button type="button" class="chip" data-sector="Financial Services">Financial Services</button>
+              <button type="button" class="chip" data-sector="Consumer Cyclical">Consumer Cyclical</button>
+              <button type="button" class="chip" data-sector="Consumer Defensive">Consumer Defensive</button>
+              <button type="button" class="chip" data-sector="Communication Services">Communication Services</button>
+              <button type="button" class="chip" data-sector="Industrials">Industrials</button>
+              <button type="button" class="chip" data-sector="Energy">Energy</button>
+              <button type="button" class="chip" data-sector="Basic Materials">Basic Materials</button>
+              <button type="button" class="chip" data-sector="Real Estate">Real Estate</button>
+              <button type="button" class="chip" data-sector="Utilities">Utilities</button>
+            </div>
           </div>
 
-          <div class="filter-row">
-            <label for="fCap">Company size</label>
-            <select id="fCap">
-              <option value="">Any size</option>
-              <option value="mega">Mega cap (over $200B)</option>
-              <option value="large">Large cap ($10B–$200B)</option>
-              <option value="mid">Mid cap ($2B–$10B)</option>
-              <option value="small">Small cap ($300M–$2B)</option>
-              <option value="micro">Micro cap (under $300M)</option>
-            </select>
+          <div class="filter-row col">
+            <label>Company size <span class="hint">(pick any number)</span></label>
+            <div class="chip-group" id="capGroup">
+              <button type="button" class="chip" data-cap="mega">Mega cap (over $200B)</button>
+              <button type="button" class="chip" data-cap="large">Large cap ($10B–$200B)</button>
+              <button type="button" class="chip" data-cap="mid">Mid cap ($2B–$10B)</button>
+              <button type="button" class="chip" data-cap="small">Small cap ($300M–$2B)</button>
+              <button type="button" class="chip" data-cap="micro">Micro cap (under $300M)</button>
+            </div>
           </div>
 
           <div class="filter-row">
@@ -198,10 +196,47 @@
             </div>
           </div>
 
+          <div class="filter-row" id="betaRow">
+            <label>Beta (volatility)</label>
+            <div class="range-inputs">
+              <input id="fBetaMin" type="number" inputmode="decimal" step="0.1" placeholder="min" />
+              <span>to</span>
+              <input id="fBetaMax" type="number" inputmode="decimal" step="0.1" placeholder="max" />
+            </div>
+          </div>
+
           <div class="filter-row" id="peRow">
             <label for="fPeMax">Max P/E ratio</label>
             <div class="range-inputs">
               <input id="fPeMax" type="number" inputmode="decimal" placeholder="e.g. 20" />
+            </div>
+          </div>
+
+          <div class="filter-row" id="pbRow">
+            <label for="fPbMax">Max Price/Book ratio</label>
+            <div class="range-inputs">
+              <input id="fPbMax" type="number" inputmode="decimal" placeholder="e.g. 3" />
+            </div>
+          </div>
+
+          <div class="filter-row" id="roeRow">
+            <label for="fRoeMin">Min return on equity (%)</label>
+            <div class="range-inputs">
+              <input id="fRoeMin" type="number" inputmode="decimal" placeholder="e.g. 15" />
+            </div>
+          </div>
+
+          <div class="filter-row" id="epsgRow">
+            <label for="fEpsgMin">Min EPS growth (%)</label>
+            <div class="range-inputs">
+              <input id="fEpsgMin" type="number" inputmode="decimal" placeholder="e.g. 10" />
+            </div>
+          </div>
+
+          <div class="filter-row" id="deRow">
+            <label for="fDeMax">Max debt/equity</label>
+            <div class="range-inputs">
+              <input id="fDeMax" type="number" inputmode="decimal" placeholder="e.g. 100" />
             </div>
           </div>
 
@@ -214,12 +249,16 @@
 
           <div class="filter-row">
             <label for="fVol">Min. daily volume</label>
-            <select id="fVol">
-              <option value="">Any volume</option>
-              <option value="100k">100K+ shares</option>
-              <option value="1m">1M+ shares</option>
-              <option value="10m">10M+ shares</option>
-            </select>
+            <div class="range-inputs">
+              <input id="fVol" type="number" inputmode="numeric" placeholder="e.g. 1000000" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label for="fAvgVol">Min. avg. volume (3-month)</label>
+            <div class="range-inputs">
+              <input id="fAvgVol" type="number" inputmode="numeric" placeholder="e.g. 500000" />
+            </div>
           </div>
 
           <div class="filter-row">

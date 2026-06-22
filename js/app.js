@@ -519,8 +519,6 @@ const CAP_PRESETS = {
   small: [300e6, 2e9],
   micro: [null, 300e6],
 };
-const VOL_PRESETS = { "100k": 1e5, "1m": 1e6, "10m": 1e7 };
-
 function switchView(view) {
   state.view = view;
   $("view-watchlist").hidden = view !== "watchlist";
@@ -538,18 +536,22 @@ const SECTOR_VALUES = [
 const REGION_VALUES = ["us","any","gb","de","fr","ca","jp","cn","hk","in","au","nl","ch","br","kr","es","it","se"];
 
 const DEFAULT_SPEC = {
-  type: "stocks", region: "us", sector: null,
-  marketCapMin: null, marketCapMax: null,
+  type: "stocks", region: ["us"], sector: [],
+  marketCapTiers: [], marketCapMin: null, marketCapMax: null,
   priceMin: null, priceMax: null,
   dayChangeMin: null, dayChangeMax: null,
   yearChangeMin: null, yearChangeMax: null,
-  peMax: null, dividendMin: null,
-  volumeMin: null, sort: "marketcap",
+  betaMin: null, betaMax: null,
+  peMax: null, pbMax: null, roeMin: null, epsGrowthMin: null, debtEquityMax: null,
+  dividendMin: null,
+  volumeMin: null, avgVolumeMin: null,
+  sort: "marketcap",
 };
 const RANGE_FIELDS = [
   "marketCapMin","marketCapMax","priceMin","priceMax",
   "dayChangeMin","dayChangeMax","yearChangeMin","yearChangeMax",
-  "peMax","dividendMin","volumeMin",
+  "betaMin","betaMax","peMax","pbMax","roeMin","epsGrowthMin","debtEquityMax",
+  "dividendMin","volumeMin","avgVolumeMin",
 ];
 
 function numOrNull(v) {
@@ -574,89 +576,112 @@ function capLabel(min, max) {
   return "Custom";
 }
 
+/* Chip groups (region/sector/company size) are multi-select: any number of
+ * buttons can be active at once, and the spec stores them as arrays so the
+ * screener can OR them together instead of being limited to one choice. */
+function getChipValues(groupId, key) {
+  return [...$(groupId).querySelectorAll(".chip.active")].map((b) => b.dataset[key]);
+}
+function setChipValues(groupId, key, values) {
+  const set = new Set((values || []).map(String));
+  $(groupId).querySelectorAll(".chip").forEach((b) => {
+    b.classList.toggle("active", set.has(b.dataset[key]));
+  });
+}
+
+// Company size gets its own writer: picking tiers OR a custom AI-set range
+// (shown as a one-off "Custom" chip when it doesn't match a tier exactly).
+function writeCapGroup(tiers, min, max) {
+  const group = $("capGroup");
+  group.querySelectorAll('.chip[data-cap="custom"]').forEach((b) => b.remove());
+  const tierSet = new Set(tiers || []);
+  group.querySelectorAll(".chip[data-cap]").forEach((b) => {
+    b.classList.toggle("active", tierSet.has(b.dataset.cap));
+  });
+  if (min != null || max != null) {
+    const matchesTier = Object.entries(CAP_PRESETS).some(([k, [lo, hi]]) =>
+      tierSet.has(k) && (lo ?? null) === (min ?? null) && (hi ?? null) === (max ?? null));
+    if (!matchesTier) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip active";
+      chip.dataset.cap = "custom";
+      chip.dataset.min = min ?? "";
+      chip.dataset.max = max ?? "";
+      chip.textContent = `Custom (${capLabel(min, max)})`;
+      group.appendChild(chip);
+    }
+  }
+}
+
 /* The form is just an editor for state.discover.spec; the AI edits the same
  * spec. readForm/writeForm keep the two in sync (both directions). */
 function readForm() {
   const type = $("segType").querySelector(".active")?.dataset.type || "stocks";
-  let capMin = null, capMax = null;
-  const capVal = $("fCap").value;
-  if (capVal === "custom") {
-    const o = $("fCap").querySelector('option[value="custom"]');
-    capMin = o?.dataset.min ? Number(o.dataset.min) : null;
-    capMax = o?.dataset.max ? Number(o.dataset.max) : null;
-  } else if (CAP_PRESETS[capVal]) {
-    [capMin, capMax] = CAP_PRESETS[capVal];
-  }
+  const regions = getChipValues("regionGroup", "region");
+  const sectors = type === "stocks" ? getChipValues("sectorGroup", "sector") : [];
+  const capTiers = getChipValues("capGroup", "cap").filter((c) => c !== "custom");
+  const customCap = $("capGroup").querySelector('.chip[data-cap="custom"].active');
   return {
     type,
-    region: $("fRegion").value,
-    sector: type === "stocks" ? ($("fSector").value || null) : null,
-    marketCapMin: capMin,
-    marketCapMax: capMax,
+    region: regions.length ? regions : ["us"],
+    sector: sectors,
+    marketCapTiers: capTiers,
+    marketCapMin: customCap && customCap.dataset.min ? Number(customCap.dataset.min) : null,
+    marketCapMax: customCap && customCap.dataset.max ? Number(customCap.dataset.max) : null,
     priceMin: numOrNull($("fPriceMin").value),
     priceMax: numOrNull($("fPriceMax").value),
     dayChangeMin: numOrNull($("fDayMin").value),
     dayChangeMax: numOrNull($("fDayMax").value),
     yearChangeMin: numOrNull($("fYearMin").value),
     yearChangeMax: numOrNull($("fYearMax").value),
+    betaMin: type === "stocks" ? numOrNull($("fBetaMin").value) : null,
+    betaMax: type === "stocks" ? numOrNull($("fBetaMax").value) : null,
     peMax: type === "stocks" ? numOrNull($("fPeMax").value) : null,
+    pbMax: type === "stocks" ? numOrNull($("fPbMax").value) : null,
+    roeMin: type === "stocks" ? numOrNull($("fRoeMin").value) : null,
+    epsGrowthMin: type === "stocks" ? numOrNull($("fEpsgMin").value) : null,
+    debtEquityMax: type === "stocks" ? numOrNull($("fDeMax").value) : null,
     dividendMin: numOrNull($("fDivMin").value),
-    volumeMin: numOrNull($("fVol").value === "" ? null : (VOL_PRESETS[$("fVol").value] ?? null)),
+    volumeMin: numOrNull($("fVol").value),
+    avgVolumeMin: numOrNull($("fAvgVol").value),
     sort: $("fSort").value,
   };
 }
 
-function setCapControl(min, max) {
-  const sel = $("fCap");
-  const existing = sel.querySelector('option[value="custom"]');
-  let match = "";
-  for (const [k, [lo, hi]] of Object.entries(CAP_PRESETS)) {
-    if ((lo ?? null) === (min ?? null) && (hi ?? null) === (max ?? null)) { match = k; break; }
-  }
-  if (match || (min == null && max == null)) {
-    if (existing) existing.remove();
-    sel.value = match;
-  } else {
-    const label = capLabel(min, max);
-    const opt = existing || document.createElement("option");
-    opt.value = "custom";
-    opt.textContent = `Custom (${label})`;
-    opt.dataset.min = min ?? "";
-    opt.dataset.max = max ?? "";
-    if (!existing) sel.appendChild(opt);
-    sel.value = "custom";
-  }
-}
-
-function setVolControl(min) {
-  const map = { 100000: "100k", 1000000: "1m", 10000000: "10m" };
-  $("fVol").value = min != null && map[min] ? map[min] : "";
-}
-
 function writeForm(spec) {
   setType(spec.type || "stocks");
-  $("fRegion").value = REGION_VALUES.includes(spec.region) ? spec.region : "us";
-  $("fSector").value = spec.sector && SECTOR_VALUES.includes(spec.sector) ? spec.sector : "";
-  setCapControl(spec.marketCapMin ?? null, spec.marketCapMax ?? null);
+  setChipValues("regionGroup", "region", spec.region && spec.region.length ? spec.region : ["us"]);
+  setChipValues("sectorGroup", "sector", spec.sector || []);
+  writeCapGroup(spec.marketCapTiers || [], spec.marketCapMin ?? null, spec.marketCapMax ?? null);
   $("fPriceMin").value = spec.priceMin ?? "";
   $("fPriceMax").value = spec.priceMax ?? "";
   $("fDayMin").value = spec.dayChangeMin ?? "";
   $("fDayMax").value = spec.dayChangeMax ?? "";
   $("fYearMin").value = spec.yearChangeMin ?? "";
   $("fYearMax").value = spec.yearChangeMax ?? "";
+  $("fBetaMin").value = spec.betaMin ?? "";
+  $("fBetaMax").value = spec.betaMax ?? "";
   $("fPeMax").value = spec.peMax ?? "";
+  $("fPbMax").value = spec.pbMax ?? "";
+  $("fRoeMin").value = spec.roeMin ?? "";
+  $("fEpsgMin").value = spec.epsGrowthMin ?? "";
+  $("fDeMax").value = spec.debtEquityMax ?? "";
   $("fDivMin").value = spec.dividendMin ?? "";
-  setVolControl(spec.volumeMin ?? null);
+  $("fVol").value = spec.volumeMin ?? "";
+  $("fAvgVol").value = spec.avgVolumeMin ?? "";
   $("fSort").value = SORT_VALUES.includes(spec.sort) ? spec.sort : "marketcap";
 }
 
 function setType(type) {
   $("segType").querySelectorAll("button").forEach((b) =>
     b.classList.toggle("active", b.dataset.type === type));
-  // Sector and P/E only apply to individual stocks.
+  // Sector and fundamentals (P/E, P/B, ROE, EPS growth, debt/equity, beta)
+  // only apply to individual stocks, not ETFs.
   const stocksOnly = type === "stocks" ? "" : "none";
-  $("sectorRow").style.display = stocksOnly;
-  $("peRow").style.display = stocksOnly;
+  for (const id of ["sectorRow", "betaRow", "peRow", "pbRow", "roeRow", "epsgRow", "deRow"]) {
+    $(id).style.display = stocksOnly;
+  }
 }
 
 function clearPresetHighlight() {
@@ -693,6 +718,18 @@ function setDiscoverStatus(msg) {
   $("discoverStatus").textContent = msg;
 }
 
+// Company-size tiers + an optional custom range all OR together into one
+// list of [min, max] ranges for the backend to combine.
+function buildCapRanges(spec) {
+  const ranges = (spec.marketCapTiers || [])
+    .map((t) => CAP_PRESETS[t])
+    .filter(Boolean);
+  if (spec.marketCapMin != null || spec.marketCapMax != null) {
+    ranges.push([spec.marketCapMin ?? null, spec.marketCapMax ?? null]);
+  }
+  return ranges;
+}
+
 async function runScreen(reset) {
   const d = state.discover;
   if (d.loading) return;
@@ -712,7 +749,12 @@ async function runScreen(reset) {
   }
 
   try {
-    const spec = { ...d.spec, size: d.size, offset: reset ? 0 : d.items.length };
+    const spec = {
+      ...d.spec,
+      marketCapRanges: buildCapRanges(d.spec),
+      size: d.size,
+      offset: reset ? 0 : d.items.length,
+    };
     const data = await apiScreen(spec);
     const incoming = data.quotes || [];
     d.total = data.total || d.items.length + incoming.length;
@@ -900,17 +942,23 @@ You must respond with JSON matching the provided schema. Choose exactly one "act
 
 Independently of the action, you MAY set "addToWatchlist" to a list of tickers to add to the user's watchlist when they ask (e.g. "add the top 3 to my watchlist"). Use real Yahoo symbols, preferably ones in the current results.
 
-FILTER FIELDS (all optional unless noted):
+FILTER FIELDS (all optional unless noted). Filters within a field combine with OR (e.g. picking several regions or sectors broadens the search, it does not narrow to one):
 - type: "stocks" or "etfs" (required in filters).
-- region: one of us, any, gb, de, fr, ca, jp, cn, hk, in, au, nl, ch, br, kr, es, it, se. "any" = any major market. (required in filters; default us)
-- sector (stocks only): exactly one of: Technology, Healthcare, Financial Services, Consumer Cyclical, Consumer Defensive, Communication Services, Industrials, Energy, Basic Materials, Real Estate, Utilities.
+- region: an ARRAY of any number of: us, any, gb, de, fr, ca, jp, cn, hk, in, au, nl, ch, br, kr, es, it, se. "any" = any major market (use it alone). (required in filters; default ["us"])
+- sector (stocks only): an ARRAY of any number of: Technology, Healthcare, Financial Services, Consumer Cyclical, Consumer Defensive, Communication Services, Industrials, Energy, Basic Materials, Real Estate, Utilities. Omit/empty = all sectors.
 - marketCapMin / marketCapMax: market cap in USD (e.g. 10000000000 = $10B). For ETFs this means fund net assets.
 - priceMin / priceMax: share price in USD.
 - dayChangeMin / dayChangeMax: percent change TODAY (e.g. 5 = up 5%, -3 = down 3%).
 - yearChangeMin / yearChangeMax: percent change over the past 1 YEAR (52 weeks).
+- betaMin / betaMax (stocks only): beta (volatility vs. the market; 1 = market-like, <1 = calmer, >1 = more volatile).
 - peMax: maximum trailing P/E ratio (stocks only; lower = cheaper/"value", e.g. 15).
+- pbMax (stocks only): maximum price/book ratio.
+- roeMin (stocks only): minimum return on equity, percent.
+- epsGrowthMin (stocks only): minimum trailing EPS growth, percent.
+- debtEquityMax (stocks only): maximum total debt/equity ratio.
 - dividendMin: minimum dividend yield in percent (e.g. 3 = at least 3%).
 - volumeMin: minimum shares traded today.
+- avgVolumeMin: minimum 3-month average daily volume (use for "liquid" requests).
 - sort: one of marketcap, gainers (today up), losers (today down), volume, price, yeargainers (1y up), yearlosers (1y down), lowpe (cheapest by P/E), dividend (highest yield).
 
 IMPORTANT: The screener can only filter on the fields above. The only performance time windows it supports are TODAY and 1 YEAR. If the user asks for a window it can't do (e.g. "up this week"/"last month"), pick the closest available window, say so in your reply, and/or use "curate" on the loaded results. "Cheap/value" usually means low peMax (and sort lowpe); "income/safe dividend" means dividendMin (and sort dividend).
@@ -937,14 +985,16 @@ function aiResponseSchema() {
         type: "OBJECT",
         properties: {
           type: { type: "STRING", enum: ["stocks", "etfs"] },
-          region: { type: "STRING" },
-          sector: { type: "STRING" },
+          region: { type: "ARRAY", items: { type: "STRING" } },
+          sector: { type: "ARRAY", items: { type: "STRING" } },
           marketCapMin: NUM, marketCapMax: NUM,
           priceMin: NUM, priceMax: NUM,
           dayChangeMin: NUM, dayChangeMax: NUM,
           yearChangeMin: NUM, yearChangeMax: NUM,
-          peMax: NUM, dividendMin: NUM,
-          volumeMin: NUM,
+          betaMin: NUM, betaMax: NUM,
+          peMax: NUM, pbMax: NUM, roeMin: NUM, epsGrowthMin: NUM, debtEquityMax: NUM,
+          dividendMin: NUM,
+          volumeMin: NUM, avgVolumeMin: NUM,
           sort: { type: "STRING", enum: SORT_VALUES },
         },
       },
@@ -955,17 +1005,30 @@ function aiResponseSchema() {
   };
 }
 
+const STOCKS_ONLY_RANGE_FIELDS = ["betaMin", "betaMax", "peMax", "pbMax", "roeMin", "epsGrowthMin", "debtEquityMax"];
+
+// Arrays from the AI may arrive as a single string, a list, or be missing —
+// normalize to a deduped array of allowed values.
+function sanitizeArray(value, allowed) {
+  const list = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(list.map(String).filter((v) => allowed.includes(v)))];
+}
+
 function sanitizeSpec(filters) {
   const f = filters || {};
   const spec = { ...DEFAULT_SPEC };
   spec.type = f.type === "etfs" ? "etfs" : "stocks";
-  spec.region = REGION_VALUES.includes(f.region) ? f.region : "us";
-  spec.sector = spec.type === "stocks" && SECTOR_VALUES.includes(f.sector) ? f.sector : null;
+  const regions = sanitizeArray(f.region, REGION_VALUES);
+  spec.region = regions.length ? regions : ["us"];
+  spec.sector = spec.type === "stocks" ? sanitizeArray(f.sector, SECTOR_VALUES) : [];
   for (const k of RANGE_FIELDS) {
     const n = Number(f[k]);
     spec[k] = Number.isFinite(n) ? n : null;
   }
-  if (spec.type !== "stocks") spec.peMax = null; // P/E is a stock metric
+  if (spec.type !== "stocks") {
+    for (const k of STOCKS_ONLY_RANGE_FIELDS) spec[k] = null;
+  }
+  spec.marketCapTiers = [];
   spec.sort = SORT_VALUES.includes(f.sort) ? f.sort : "marketcap";
   return spec;
 }
@@ -1378,6 +1441,29 @@ function init() {
   $("segType").addEventListener("click", (e) => {
     const btn = e.target.closest("button");
     if (btn) setType(btn.dataset.type);
+  });
+  $("regionGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip");
+    if (!btn) return;
+    const group = $("regionGroup");
+    if (btn.dataset.region === "any") {
+      const turningOn = !btn.classList.contains("active");
+      group.querySelectorAll(".chip").forEach((b) => b.classList.toggle("active", b === btn && turningOn));
+    } else {
+      group.querySelector('.chip[data-region="any"]').classList.remove("active");
+      btn.classList.toggle("active");
+      if (!group.querySelectorAll(".chip.active").length) btn.classList.add("active");
+    }
+  });
+  $("sectorGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip");
+    if (btn) btn.classList.toggle("active");
+  });
+  $("capGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip");
+    if (!btn) return;
+    if (btn.dataset.cap === "custom") { btn.remove(); return; }
+    btn.classList.toggle("active");
   });
   $("applyFilters").addEventListener("click", () => {
     state.discover.spec = readForm();

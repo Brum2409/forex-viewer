@@ -10,9 +10,11 @@ interactive charts. Real market data, no API key required. Sign in with just a
   the cloud and is restored anywhere you sign in
 - **Discover** — a powerful screener over the whole market: one-tap quick picks
   (top gainers/losers, most active, large caps, best/worst 1-year performers)
-  plus easy advanced filters by country, sector, company size, price,
-  performance (today & 1-year), **valuation (max P/E)**, **dividend yield** and
-  volume — sortable by gainers, value (lowest P/E), highest yield, and more
+  plus easy advanced filters by country, sector and company size (all
+  multi-select — pick any combination, OR'd together), price, performance
+  (today & 1-year), **beta**, **valuation (P/E, P/B)**, **quality (ROE, EPS
+  growth, debt/equity)**, **dividend yield** and volume (daily + 3-month
+  average) — sortable by gainers, value (lowest P/E), highest yield, and more
 - **AI search helper** — describe what you want in plain English and the AI sets
   the filters for you, hand-picks from the current results for follow-ups
   ("only the ones under $100", "hide the Chinese companies", "rank these by
@@ -59,9 +61,9 @@ a friendly filter spec into a Yahoo query. The browser just POSTs something like
 ```json
 {
   "type": "stocks",
-  "region": "us",
-  "sector": "Technology",
-  "marketCapMin": 10000000000,
+  "region": ["us", "gb"],
+  "sector": ["Technology", "Healthcare"],
+  "marketCapRanges": [[10000000000, 200000000000]],
   "yearChangeMin": 20,
   "sort": "yeargainers",
   "size": 50,
@@ -69,7 +71,16 @@ a friendly filter spec into a Yahoo query. The browser just POSTs something like
 }
 ```
 
-and gets back a normalized `{ quotes, total, offset, size }`. Filtering runs
+`region`, `sector` and `marketCapRanges` accept multiple values, which are
+OR'd together server-side — e.g. picking several countries or sectors
+broadens the search instead of narrowing it to a single choice. `marketCapRanges`
+is a list of `[min, max]` tuples (one per selected company-size tier, plus any
+custom range), all combined with OR. All other numeric filters (price, beta,
+P/E, P/B, ROE, EPS growth, debt/equity, dividend yield, volume) are simple
+min/max bounds, AND'd together. Fundamentals filters (beta, P/E, P/B, ROE, EPS
+growth, debt/equity) only apply to stocks.
+
+Filtering gets back a normalized `{ quotes, total, offset, size }` and runs
 across Yahoo's whole universe, so paging uses `offset` for "Load more".
 
 ### The AI helper (`/api/ai`)
