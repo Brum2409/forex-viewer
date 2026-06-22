@@ -47,19 +47,169 @@
     </div>
   </header>
 
-  <div class="search-wrap">
-    <input id="searchInput" class="search-input" type="search"
-      placeholder="Search & add a stock or ETF — e.g. AAPL, Tesla, VOO"
-      autocomplete="off" spellcheck="false" />
-    <div id="searchResults" class="search-results" hidden></div>
-  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="watchlist">★ Watchlist</button>
+    <button class="tab" data-view="discover">🔍 Discover</button>
+  </nav>
 
-  <main class="content" id="watchlist">
-    <div class="center-msg" id="initLoader">
-      <div class="loader"></div>
-      <span>Fetching live prices…</span>
+  <!-- Watchlist view -->
+  <section class="view" id="view-watchlist">
+    <div class="search-wrap">
+      <input id="searchInput" class="search-input" type="search"
+        placeholder="Search & add a stock or ETF — e.g. AAPL, Tesla, VOO"
+        autocomplete="off" spellcheck="false" />
+      <div id="searchResults" class="search-results" hidden></div>
     </div>
-  </main>
+
+    <main class="content" id="watchlist">
+      <div class="center-msg" id="initLoader">
+        <div class="loader"></div>
+        <span>Fetching live prices…</span>
+      </div>
+    </main>
+  </section>
+
+  <!-- Discover view -->
+  <section class="view" id="view-discover" hidden>
+    <div class="discover">
+      <p class="discover-intro">Find new stocks &amp; ETFs across the whole market. Tap a quick pick or open Filters.</p>
+
+      <div class="preset-row" id="presetRow">
+        <button class="preset" data-preset="gainers">📈 Top gainers</button>
+        <button class="preset" data-preset="losers">📉 Biggest drops</button>
+        <button class="preset" data-preset="active">🔥 Most active</button>
+        <button class="preset" data-preset="large">💎 Large caps</button>
+        <button class="preset" data-preset="yearup">🚀 Up 20%+ (1Y)</button>
+        <button class="preset" data-preset="yeardown">🩸 Down 20%+ (1Y)</button>
+      </div>
+
+      <details class="filters" id="filters">
+        <summary>⚙︎ Filters</summary>
+        <div class="filter-body">
+          <div class="filter-row">
+            <label>I'm looking for</label>
+            <div class="seg seg-type" id="segType">
+              <button class="active" data-type="stocks">Stocks</button>
+              <button data-type="etfs">ETFs</button>
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label for="fRegion">Country / market</label>
+            <select id="fRegion">
+              <option value="us" selected>🇺🇸 United States</option>
+              <option value="any">🌍 Any major market</option>
+              <option value="gb">🇬🇧 United Kingdom</option>
+              <option value="de">🇩🇪 Germany</option>
+              <option value="fr">🇫🇷 France</option>
+              <option value="ca">🇨🇦 Canada</option>
+              <option value="jp">🇯🇵 Japan</option>
+              <option value="cn">🇨🇳 China</option>
+              <option value="hk">🇭🇰 Hong Kong</option>
+              <option value="in">🇮🇳 India</option>
+              <option value="au">🇦🇺 Australia</option>
+              <option value="nl">🇳🇱 Netherlands</option>
+              <option value="ch">🇨🇭 Switzerland</option>
+              <option value="br">🇧🇷 Brazil</option>
+              <option value="kr">🇰🇷 South Korea</option>
+              <option value="es">🇪🇸 Spain</option>
+              <option value="it">🇮🇹 Italy</option>
+              <option value="se">🇸🇪 Sweden</option>
+            </select>
+          </div>
+
+          <div class="filter-row" id="sectorRow">
+            <label for="fSector">Sector</label>
+            <select id="fSector">
+              <option value="">Any sector</option>
+              <option value="Technology">Technology</option>
+              <option value="Healthcare">Healthcare</option>
+              <option value="Financial Services">Financial Services</option>
+              <option value="Consumer Cyclical">Consumer Cyclical</option>
+              <option value="Consumer Defensive">Consumer Defensive</option>
+              <option value="Communication Services">Communication Services</option>
+              <option value="Industrials">Industrials</option>
+              <option value="Energy">Energy</option>
+              <option value="Basic Materials">Basic Materials</option>
+              <option value="Real Estate">Real Estate</option>
+              <option value="Utilities">Utilities</option>
+            </select>
+          </div>
+
+          <div class="filter-row">
+            <label for="fCap">Company size</label>
+            <select id="fCap">
+              <option value="">Any size</option>
+              <option value="mega">Mega cap (over $200B)</option>
+              <option value="large">Large cap ($10B–$200B)</option>
+              <option value="mid">Mid cap ($2B–$10B)</option>
+              <option value="small">Small cap ($300M–$2B)</option>
+              <option value="micro">Micro cap (under $300M)</option>
+            </select>
+          </div>
+
+          <div class="filter-row">
+            <label>Price ($)</label>
+            <div class="range-inputs">
+              <input id="fPriceMin" type="number" inputmode="decimal" placeholder="min" />
+              <span>to</span>
+              <input id="fPriceMax" type="number" inputmode="decimal" placeholder="max" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label>Change today (%)</label>
+            <div class="range-inputs">
+              <input id="fDayMin" type="number" inputmode="decimal" placeholder="min" />
+              <span>to</span>
+              <input id="fDayMax" type="number" inputmode="decimal" placeholder="max" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label>Change over 1 year (%)</label>
+            <div class="range-inputs">
+              <input id="fYearMin" type="number" inputmode="decimal" placeholder="min" />
+              <span>to</span>
+              <input id="fYearMax" type="number" inputmode="decimal" placeholder="max" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label for="fVol">Min. daily volume</label>
+            <select id="fVol">
+              <option value="">Any volume</option>
+              <option value="100k">100K+ shares</option>
+              <option value="1m">1M+ shares</option>
+              <option value="10m">10M+ shares</option>
+            </select>
+          </div>
+
+          <div class="filter-row">
+            <label for="fSort">Sort by</label>
+            <select id="fSort">
+              <option value="marketcap">Largest companies</option>
+              <option value="gainers">Biggest gainers today</option>
+              <option value="losers">Biggest losers today</option>
+              <option value="volume">Most active</option>
+              <option value="price">Highest price</option>
+              <option value="yeargainers">Best 1-year performers</option>
+              <option value="yearlosers">Worst 1-year performers</option>
+            </select>
+          </div>
+
+          <div class="filter-actions">
+            <button class="btn-ghost" id="resetFilters" type="button">Reset</button>
+            <button class="btn-primary" id="applyFilters" type="button">Apply filters</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="discover-status" id="discoverStatus"></div>
+      <div class="content" id="discoverResults"></div>
+      <button class="load-more" id="loadMore" type="button" hidden>Load more</button>
+    </div>
+  </section>
 
   <footer class="footer">
     Data via Yahoo Finance · prices may be delayed · not investment advice

@@ -21,6 +21,14 @@ const state = {
   active: null,        // symbol shown in detail sheet
   refreshTimer: null,
   saveTimer: null,
+  view: "watchlist",   // "watchlist" | "discover"
+  discover: {          // screener (Discover tab) state
+    items: [],
+    total: 0,
+    size: 50,
+    loading: false,
+    loaded: false,
+  },
 };
 
 /* ── username helpers ────────────────────── */
@@ -318,6 +326,20 @@ async function apiSearch(q) {
   return { results };
 }
 
+async function apiScreen(spec) {
+  const res = await fetch("/api/screen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+  if (!res.ok) {
+    let msg = `screen ${res.status}`;
+    try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 /* ── data fetching ───────────────────────── */
 async function fetchQuotes() {
   if (!state.symbols.length) { renderList(); return; }
@@ -456,6 +478,196 @@ function removeSymbol(symbol) {
   renderList();
 }
 
+/* ── Discover (screener) ─────────────────── */
+const CAP_PRESETS = {
+  mega:  [200e9, null],
+  large: [10e9, 200e9],
+  mid:   [2e9, 10e9],
+  small: [300e6, 2e9],
+  micro: [null, 300e6],
+};
+const VOL_PRESETS = { "100k": 1e5, "1m": 1e6, "10m": 1e7 };
+
+function switchView(view) {
+  state.view = view;
+  $("view-watchlist").hidden = view !== "watchlist";
+  $("view-discover").hidden = view !== "discover";
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.view === view));
+  if (view === "discover" && !state.discover.loaded) runScreen(true);
+}
+
+function currentType() {
+  return $("segType").querySelector(".active")?.dataset.type || "stocks";
+}
+
+function numOrNull(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function buildSpec(offset) {
+  const type = currentType();
+  const cap = CAP_PRESETS[$("fCap").value];
+  return {
+    type,
+    region: $("fRegion").value,
+    sector: type === "stocks" ? ($("fSector").value || null) : null,
+    marketCapMin: cap ? cap[0] : null,
+    marketCapMax: cap ? cap[1] : null,
+    priceMin: numOrNull($("fPriceMin").value),
+    priceMax: numOrNull($("fPriceMax").value),
+    dayChangeMin: numOrNull($("fDayMin").value),
+    dayChangeMax: numOrNull($("fDayMax").value),
+    yearChangeMin: numOrNull($("fYearMin").value),
+    yearChangeMax: numOrNull($("fYearMax").value),
+    volumeMin: VOL_PRESETS[$("fVol").value] ?? null,
+    sort: $("fSort").value,
+    size: state.discover.size,
+    offset: offset || 0,
+  };
+}
+
+function setType(type) {
+  $("segType").querySelectorAll("button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.type === type));
+  // Sector only applies to individual stocks.
+  $("sectorRow").style.display = type === "stocks" ? "" : "none";
+}
+
+function resetFilters() {
+  setType("stocks");
+  $("fRegion").value = "us";
+  $("fSector").value = "";
+  $("fCap").value = "";
+  ["fPriceMin","fPriceMax","fDayMin","fDayMax","fYearMin","fYearMax"].forEach((id) => ($(id).value = ""));
+  $("fVol").value = "";
+  $("fSort").value = "marketcap";
+  $("presetRow").querySelectorAll(".preset").forEach((p) => p.classList.remove("active"));
+}
+
+// One-tap shortcuts that configure the filter form, then run.
+function applyPreset(preset) {
+  resetFilters();
+  const cfg = {
+    gainers:  { fSort: "gainers",     fDayMin: "2" },
+    losers:   { fSort: "losers",      fDayMax: "-2" },
+    active:   { fSort: "volume" },
+    large:    { fSort: "marketcap",   fCap: "large" },
+    yearup:   { fSort: "yeargainers", fYearMin: "20" },
+    yeardown: { fSort: "yearlosers",  fYearMax: "-20" },
+  }[preset];
+  if (!cfg) return;
+  for (const [id, val] of Object.entries(cfg)) $(id).value = val;
+  $("presetRow").querySelectorAll(".preset").forEach((p) =>
+    p.classList.toggle("active", p.dataset.preset === preset));
+  runScreen(true);
+}
+
+function setDiscoverStatus(msg) {
+  $("discoverStatus").textContent = msg;
+}
+
+async function runScreen(reset) {
+  const d = state.discover;
+  if (d.loading) return;
+  d.loading = true;
+  d.loaded = true;
+
+  if (reset) {
+    d.items = [];
+    d.total = 0;
+    $("loadMore").hidden = true;
+    renderDiscover();
+    setDiscoverStatus("Searching the market…");
+  } else {
+    setDiscoverStatus("Loading more…");
+  }
+
+  try {
+    const data = await apiScreen(buildSpec(reset ? 0 : d.items.length));
+    const incoming = data.quotes || [];
+    d.total = data.total || d.items.length + incoming.length;
+    d.items = reset ? incoming : d.items.concat(incoming);
+    renderDiscover();
+    if (!d.items.length) {
+      setDiscoverStatus("No matches — try widening your filters.");
+    } else {
+      setDiscoverStatus(`Showing ${d.items.length} of ${d.total.toLocaleString()} matches`);
+    }
+    $("loadMore").hidden = !incoming.length || d.items.length >= d.total;
+  } catch (e) {
+    if (!HAS_BACKEND) {
+      setDiscoverStatus("Discover needs the live backend — open the app on Vercel.");
+    } else {
+      setDiscoverStatus("Couldn't load results. Please try again.");
+    }
+    $("loadMore").hidden = true;
+  } finally {
+    d.loading = false;
+  }
+}
+
+function renderDiscover() {
+  const root = $("discoverResults");
+  root.innerHTML = "";
+  for (const q of state.discover.items) root.appendChild(discoverCard(q));
+}
+
+function syncDiscoverAddButtons() {
+  $("discoverResults").querySelectorAll(".discover-card").forEach((el) => {
+    const btn = el.querySelector(".add-btn");
+    if (!btn) return;
+    const added = state.symbols.includes((el.dataset.sym || "").toUpperCase());
+    btn.classList.toggle("added", added);
+    btn.textContent = added ? "✓ Added" : "+ Add";
+  });
+}
+
+function discoverCard(q) {
+  const el = document.createElement("div");
+  el.className = "card discover-card";
+  el.dataset.sym = q.symbol;
+  const ch = fmtChange(q.change, q.changePct);
+  const added = state.symbols.includes(q.symbol.toUpperCase());
+
+  const tags = [];
+  if (q.marketCap) tags.push(`<span class="tag">${fmtBig(q.marketCap)}</span>`);
+  if (q.sector) tags.push(`<span class="tag">${escapeHtml(q.sector)}</span>`);
+  if (q.yearChangePct != null) {
+    const cls = q.yearChangePct >= 0 ? "up" : "down";
+    const sign = q.yearChangePct >= 0 ? "+" : "";
+    tags.push(`<span class="tag ${cls}">1Y ${sign}${q.yearChangePct.toFixed(1)}%</span>`);
+  }
+
+  el.innerHTML =
+    `<div class="card-left">
+       <div class="card-sym">${q.symbol}</div>
+       <div class="card-name">${escapeHtml(q.name)}</div>
+       <div class="card-tags">${tags.join("")}</div>
+     </div>
+     <div class="card-right">
+       <div class="card-price">${fmtPrice(q.price, q.currency)}</div>
+       <div class="card-chg ${ch.cls}">${ch.text}</div>
+       <button class="add-btn ${added ? "added" : ""}" type="button">${added ? "✓ Added" : "+ Add"}</button>
+     </div>`;
+
+  el.onclick = (e) => {
+    if (e.target.closest(".add-btn")) return;
+    const key = q.symbol.toUpperCase();
+    state.quotes.set(key, { ...state.quotes.get(key), ...q });
+    openDetail(q.symbol);
+  };
+  el.querySelector(".add-btn").onclick = (e) => {
+    e.stopPropagation();
+    addSymbol(q.symbol);
+    syncDiscoverAddButtons();
+  };
+  return el;
+}
+
 /* ── detail sheet + chart ────────────────── */
 let chart = null, series = null;
 
@@ -474,6 +686,7 @@ function openDetail(symbol) {
     el.textContent = ch.text; el.className = "big-change " + ch.cls;
   }
   renderStats(q);
+  updateSheetActionBtn();
 
   // reset range tabs to 1M
   const tabs = $("rangeTabs").querySelectorAll("button");
@@ -481,10 +694,19 @@ function openDetail(symbol) {
   loadChart("1mo", "1d");
 }
 
+// The header action toggles between adding and removing, based on membership.
+function updateSheetActionBtn() {
+  const btn = $("removeBtn");
+  const inList = state.active && state.symbols.includes(state.active);
+  btn.textContent = inList ? "🗑" : "＋";
+  btn.title = inList ? "Remove from list" : "Add to watchlist";
+}
+
 function closeDetail() {
   $("overlay").hidden = true;
   document.body.style.overflow = "";
   state.active = null;
+  syncDiscoverAddButtons(); // reflect any add/remove done from the sheet
 }
 
 function renderStats(q) {
@@ -525,11 +747,13 @@ async function loadChart(range, interval) {
     });
     series.setData(points);
     chart.timeScale().fitContent();
-    // refresh header price with the freshest quote
-    state.quotes.set(sym, { ...state.quotes.get(sym), ...q });
+    // refresh header price + stats with the freshest quote
+    const merged = { ...state.quotes.get(sym), ...q };
+    state.quotes.set(sym, merged);
     $("dPrice").textContent = fmtPrice(q.price, q.currency);
     const ch = fmtChange(q.change, q.changePct);
     const el = $("dChange"); el.textContent = ch.text; el.className = "big-change " + ch.cls;
+    renderStats(merged);
   } catch (_) {
     /* keep previous chart on error */
   } finally {
@@ -608,9 +832,15 @@ function init() {
   $("refreshBtn").addEventListener("click", () => refresh(true));
   $("backBtn").addEventListener("click", closeDetail);
   $("removeBtn").addEventListener("click", () => {
-    if (state.active && confirm(`Remove ${state.active} from your list?`)) {
-      removeSymbol(state.active);
-      closeDetail();
+    if (!state.active) return;
+    if (state.symbols.includes(state.active)) {
+      if (confirm(`Remove ${state.active} from your list?`)) {
+        removeSymbol(state.active);
+        closeDetail();
+      }
+    } else {
+      addSymbol(state.active);
+      updateSheetActionBtn();
     }
   });
   $("overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") closeDetail(); });
@@ -629,6 +859,25 @@ function init() {
     btn.classList.add("active");
     loadChart(btn.dataset.range, btn.dataset.interval);
   });
+
+  // Discover UI.
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.addEventListener("click", () => switchView(t.dataset.view)));
+  $("presetRow").addEventListener("click", (e) => {
+    const btn = e.target.closest(".preset");
+    if (btn) applyPreset(btn.dataset.preset);
+  });
+  $("segType").addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (btn) setType(btn.dataset.type);
+  });
+  $("applyFilters").addEventListener("click", () => {
+    $("presetRow").querySelectorAll(".preset").forEach((p) => p.classList.remove("active"));
+    runScreen(true);
+  });
+  $("resetFilters").addEventListener("click", () => { resetFilters(); runScreen(true); });
+  $("loadMore").addEventListener("click", () => runScreen(false));
+
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.user) refresh(false);
   });

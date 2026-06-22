@@ -8,6 +8,10 @@ interactive charts. Real market data, no API key required. Sign in with just a
 
 - **Username login** — no password, just pick a name; your watchlist syncs to
   the cloud and is restored anywhere you sign in
+- **Discover** — a powerful screener over the whole market: one-tap quick picks
+  (top gainers/losers, most active, large caps, best/worst 1-year performers)
+  plus easy advanced filters by country, sector, company size, price,
+  performance (today & 1-year) and volume
 - **Live prices** for stocks, ETFs, indices and mutual funds
 - **Search** any ticker by symbol or company name (e.g. `AAPL`, `Tesla`, `VOO`)
 - **Custom watchlist** — add/remove symbols, saved per account
@@ -20,22 +24,45 @@ interactive charts. Real market data, no API key required. Sign in with just a
 ## How it works
 
 The app is a static front-end plus a few tiny **Vercel serverless functions**.
-Two of them proxy [Yahoo Finance](https://finance.yahoo.com)'s public endpoints
+Most proxy [Yahoo Finance](https://finance.yahoo.com)'s public endpoints
 (adding the required headers, sidestepping CORS, and failing over between
-Yahoo's `query1`/`query2` hosts for reliability — no API key involved). A third
-stores each user's watchlist in **Vercel KV**.
+Yahoo's `query1`/`query2` hosts for reliability — no API key involved). The
+account function stores each user's watchlist in **Vercel KV**.
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/quote?symbols=AAPL,MSFT` | Batch quotes + 5-day sparkline data |
 | `GET /api/quote?symbol=AAPL&range=1y&interval=1d` | Full OHLC series for the chart |
 | `GET /api/search?q=apple` | Symbol/company search |
+| `POST /api/screen` | Screen all stocks/ETFs by filter spec (Discover) |
 | `GET /api/account?user=alice` | Log in / create account, returns the watchlist |
 | `PUT /api/account` | Save a user's watchlist (`{ user, watchlist }`) |
 
-Quote/search responses are cached at the edge for ~30s
+Quote/search/screen responses are cached at the edge for ~30s
 (`stale-while-revalidate`) to keep things snappy and stay friendly to the
 upstream source. Account responses are never cached.
+
+### The screener (`/api/screen`)
+
+Yahoo's screener API needs a `crumb` + cookie pair, so `/api/screen` performs
+that handshake server-side (cached while the function stays warm) and translates
+a friendly filter spec into a Yahoo query. The browser just POSTs something like:
+
+```json
+{
+  "type": "stocks",
+  "region": "us",
+  "sector": "Technology",
+  "marketCapMin": 10000000000,
+  "yearChangeMin": 20,
+  "sort": "yeargainers",
+  "size": 50,
+  "offset": 0
+}
+```
+
+and gets back a normalized `{ quotes, total, offset, size }`. Filtering runs
+across Yahoo's whole universe, so paging uses `offset` for "Load more".
 
 ## Accounts & cloud sync
 
@@ -66,6 +93,7 @@ the app keeps working — just without cross-device sync.
 api/
   quote.js     # serverless: live quotes + chart history (Yahoo proxy)
   search.js    # serverless: symbol search (Yahoo proxy)
+  screen.js    # serverless: market screener / discovery (Yahoo proxy)
   account.js   # serverless: username login + watchlist sync (Vercel KV)
 css/styles.css
 js/app.js      # all front-end logic (auth + viewer)
