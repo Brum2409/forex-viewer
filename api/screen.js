@@ -90,13 +90,34 @@ function clampNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// A single min/max range as a Yahoo operand, or null if both bounds are empty.
+function rangeOperand(field, min, max) {
+  const lo = clampNum(min), hi = clampNum(max);
+  if (lo != null && hi != null) return { operator: "btwn", operands: [field, lo, hi] };
+  if (lo != null) return { operator: "gt", operands: [field, lo] };
+  if (hi != null) return { operator: "lt", operands: [field, hi] };
+  return null;
+}
+
+// Multiple equality choices for one field, OR-ed together so filters within a
+// category (e.g. several sectors, several regions) combine instead of being
+// mutually exclusive.
+function orEq(field, values) {
+  const list = (Array.isArray(values) ? values : values ? [values] : [])
+    .map((v) => String(v || "")).filter(Boolean);
+  if (!list.length) return null;
+  if (list.length === 1) return { operator: "eq", operands: [field, list[0]] };
+  return { operator: "or", operands: list.map((v) => ({ operator: "eq", operands: [field, v] })) };
+}
+
 // Turn the friendly filter spec from the browser into a Yahoo screener payload.
 function buildPayload(spec) {
   const quoteType = spec.type === "etfs" ? "ETF" : "EQUITY";
   const capField = CAP_FIELD[quoteType];
   const operands = [];
 
-  // Region (required so the query is never empty).
+  // Region (required so the query is never empty). Pick any number of
+  // markets — they combine with OR.
   let region = spec.region;
   if (region === "any" || (Array.isArray(region) && region.includes("any"))) {
     operands.push({
@@ -108,40 +129,52 @@ function buildPayload(spec) {
       .map((r) => String(r || "").toLowerCase())
       .filter((r) => /^[a-z]{2}$/.test(r));
     const regions = list.length ? list : ["us"];
-    if (regions.length === 1) {
-      operands.push({ operator: "eq", operands: ["region", regions[0]] });
-    } else {
-      operands.push({
-        operator: "or",
-        operands: regions.map((r) => ({ operator: "eq", operands: ["region", r] })),
-      });
-    }
+    operands.push(orEq("region", regions));
   }
 
-  if (quoteType === "EQUITY" && spec.sector) {
-    operands.push({ operator: "eq", operands: ["sector", String(spec.sector)] });
+  // Sector — any number selected, OR-ed together (stocks only).
+  if (quoteType === "EQUITY") {
+    const sectorOp = orEq("sector", spec.sector);
+    if (sectorOp) operands.push(sectorOp);
   }
+
+  // Market cap — any number of size tiers (or a custom range), OR-ed together.
+  const capRanges = Array.isArray(spec.marketCapRanges) ? spec.marketCapRanges : [];
+  const capClauses = capRanges
+    .map(([lo, hi]) => rangeOperand(capField, lo, hi))
+    .filter(Boolean);
+  if (capClauses.length === 1) operands.push(capClauses[0]);
+  else if (capClauses.length > 1) operands.push({ operator: "or", operands: capClauses });
 
   const ranges = [
-    [capField, spec.marketCapMin, spec.marketCapMax],
     ["intradayprice", spec.priceMin, spec.priceMax],
     ["percentchange", spec.dayChangeMin, spec.dayChangeMax],
     ["fiftytwowkpercentchange", spec.yearChangeMin, spec.yearChangeMax],
+    ["avgdailyvol3m", spec.avgVolumeMin, null],
   ];
   for (const [field, min, max] of ranges) {
-    const lo = clampNum(min), hi = clampNum(max);
-    if (lo != null && hi != null) operands.push({ operator: "btwn", operands: [field, lo, hi] });
-    else if (lo != null) operands.push({ operator: "gt", operands: [field, lo] });
-    else if (hi != null) operands.push({ operator: "lt", operands: [field, hi] });
+    const op = rangeOperand(field, min, max);
+    if (op) operands.push(op);
   }
 
   const vol = clampNum(spec.volumeMin);
   if (vol != null) operands.push({ operator: "gt", operands: ["dayvolume", vol] });
 
-  // Valuation filters. P/E is an equity metric (ignored by Yahoo for ETFs).
+  // Valuation / fundamentals filters. These are equity metrics, ignored by
+  // Yahoo's ETF screener.
   if (quoteType === "EQUITY") {
     const pe = clampNum(spec.peMax);
     if (pe != null) operands.push({ operator: "lt", operands: ["peratio.lasttwelvemonths", pe] });
+    const pb = clampNum(spec.pbMax);
+    if (pb != null) operands.push({ operator: "lt", operands: ["pricebookratio.quarterly", pb] });
+    const roe = clampNum(spec.roeMin);
+    if (roe != null) operands.push({ operator: "gt", operands: ["returnonequity.lasttwelvemonths", roe] });
+    const epsg = clampNum(spec.epsGrowthMin);
+    if (epsg != null) operands.push({ operator: "gt", operands: ["epsgrowth.lasttwelvemonths", epsg] });
+    const de = clampNum(spec.debtEquityMax);
+    if (de != null) operands.push({ operator: "lt", operands: ["totaldebtequity.lasttwelvemonths", de] });
+    const betaOp = rangeOperand("beta", spec.betaMin, spec.betaMax);
+    if (betaOp) operands.push(betaOp);
   }
   const dy = clampNum(spec.dividendMin);
   if (dy != null) operands.push({ operator: "gt", operands: ["forward_dividend_yield", dy] });
