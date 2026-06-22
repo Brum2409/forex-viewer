@@ -1,118 +1,84 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#0D1117">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="Live forex rates — all data from Yahoo Finance">
-  <title>FX Live — Forex Rates</title>
-  <link rel="manifest" href="manifest.json">
-  <link rel="stylesheet" href="css/styles.css">
-  <!-- TradingView Lightweight Charts — line & candlestick -->
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b0e14" />
+  <meta name="description" content="Live stock & ETF prices with interactive charts — real market data, no signup." />
+  <title>Ticker — Live Stocks & ETFs</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2316c784'/%3E%3Cpath d='M20 65 L40 45 L55 58 L80 30' stroke='%230b0e14' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
 <body>
 <div class="app">
-
-  <!-- ── Header ─────────────────────────────────────────── -->
   <header class="header">
-    <div class="header-brand">
-      <div class="brand-icon">FX</div>
-      <span class="brand-text">FX Live</span>
+    <div class="brand">
+      <div class="brand-icon">📈</div>
+      <span class="brand-name">Ticker</span>
     </div>
-    <div class="header-status">
-      <span class="live-dot" id="liveDot"></span>
+    <div class="status">
+      <span class="dot" id="liveDot"></span>
       <span id="statusTxt" class="status-txt">Loading…</span>
-      <span id="countdownTxt" class="countdown-txt"></span>
-      <button class="refresh-btn" id="refreshBtn" onclick="manualRefresh()" title="Refresh rates">
-        <span class="spin-icon" id="spinIcon">↻</span>
-      </button>
+      <button class="icon-btn" id="refreshBtn" title="Refresh">↻</button>
     </div>
   </header>
 
-  <!-- ── Search ─────────────────────────────────────────── -->
   <div class="search-wrap">
-    <input class="search-input" id="searchInput" type="search"
-      placeholder="Search pairs — EUR, JPY, GBP…"
-      oninput="onSearch(this.value)"
-      autocomplete="off" spellcheck="false">
+    <input id="searchInput" class="search-input" type="search"
+      placeholder="Search & add a stock or ETF — e.g. AAPL, Tesla, VOO"
+      autocomplete="off" spellcheck="false" />
+    <div id="searchResults" class="search-results" hidden></div>
   </div>
 
-  <!-- ── Main list ───────────────────────────────────────── -->
-  <main class="content" id="mainContent">
+  <main class="content" id="watchlist">
     <div class="center-msg" id="initLoader">
       <div class="loader"></div>
-      <span>Fetching live rates…</span>
+      <span>Fetching live prices…</span>
     </div>
   </main>
 
-  <!-- ── Detail slide-over ──────────────────────────────── -->
-  <div class="detail" id="detail" role="dialog" aria-modal="true">
+  <footer class="footer">
+    Data via Yahoo Finance · prices may be delayed · not investment advice
+  </footer>
+</div>
 
-    <!-- Header -->
-    <div class="detail-header">
-      <button class="back-btn" onclick="closeDetail()" aria-label="Close">←</button>
-      <div class="d-info">
-        <div class="d-pair" id="dPair">—</div>
-        <div class="d-full" id="dFull">—</div>
+<!-- Detail overlay -->
+<div class="overlay" id="overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-head">
+      <button class="icon-btn back-btn" id="backBtn" title="Close">‹</button>
+      <div class="sheet-title">
+        <div class="sheet-symbol" id="dSymbol">—</div>
+        <div class="sheet-name" id="dName">—</div>
       </div>
-      <div class="d-right">
-        <div class="d-rate" id="dRate">—</div>
-        <div class="d-chg"  id="dChg">—</div>
-      </div>
+      <button class="icon-btn" id="removeBtn" title="Remove from list">🗑</button>
     </div>
 
-    <!-- Chart toolbar: interval pills + line/candle toggle -->
-    <div class="chart-toolbar">
-      <div class="periods">
-        <button class="period-btn active" data-iv="1m"  onclick="setChartInterval(this,'1m')">1m</button>
-        <button class="period-btn"        data-iv="5m"  onclick="setChartInterval(this,'5m')">5m</button>
-        <button class="period-btn"        data-iv="15m" onclick="setChartInterval(this,'15m')">15m</button>
-        <button class="period-btn"        data-iv="30m" onclick="setChartInterval(this,'30m')">30m</button>
-        <button class="period-btn"        data-iv="1h"  onclick="setChartInterval(this,'1h')">1h</button>
-        <button class="period-btn"        data-iv="2h"  onclick="setChartInterval(this,'2h')">2h</button>
-        <button class="period-btn"        data-iv="4h"  onclick="setChartInterval(this,'4h')">4h</button>
-        <button class="period-btn"        data-iv="1D"  onclick="setChartInterval(this,'1D')">1D</button>
-        <button class="period-btn"        data-iv="1W"  onclick="setChartInterval(this,'1W')">1W</button>
-      </div>
-      <div class="type-toggle">
-        <button class="type-btn active" data-type="line"   onclick="setChartType('line')">Line</button>
-        <button class="type-btn"        data-type="candle" onclick="setChartType('candle')">Candle</button>
-      </div>
+    <div class="sheet-price">
+      <span class="big-price" id="dPrice">—</span>
+      <span class="big-change" id="dChange">—</span>
     </div>
 
-    <!-- Chart -->
+    <div class="range-tabs" id="rangeTabs">
+      <button data-range="5d"  data-interval="15m">1W</button>
+      <button data-range="1mo" data-interval="1d" class="active">1M</button>
+      <button data-range="6mo" data-interval="1d">6M</button>
+      <button data-range="1y"  data-interval="1d">1Y</button>
+      <button data-range="5y"  data-interval="1wk">5Y</button>
+    </div>
+
     <div class="chart-wrap">
-      <div id="chartContainer"></div>
-      <div class="chart-loading" id="chartLoader" style="display:none">
-        <div class="loader"></div>
-      </div>
+      <div id="chart"></div>
+      <div class="chart-loader" id="chartLoader" hidden><div class="loader"></div></div>
     </div>
 
-    <!-- OHLC stat pills -->
-    <div class="stats-row" id="statsRow"></div>
+    <div class="stats-grid" id="statsGrid"></div>
+  </div>
+</div>
 
-    <!-- Scrollable body: timeframe grid + analysis -->
-    <div class="detail-body">
-      <div id="multiTf"></div>
-      <div id="analysis-panel"></div>
-    </div>
-
-  </div><!-- .detail -->
-
-</div><!-- .app -->
-
-<script src="js/config.js"></script>
-<script src="js/state.js"></script>
-<script src="js/utils.js"></script>
-<script src="js/api.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/analysis.js"></script>
-<script src="js/backtest.js"></script>
-<script src="js/detail.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

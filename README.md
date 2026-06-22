@@ -1,47 +1,63 @@
-# FX Live — Forex Viewer
+# Ticker — Live Stocks & ETFs
 
-A mobile-first live forex exchange rate viewer hosted on GitHub Pages. : https://brum2409.github.io/forex-viewer/
+A fast, mobile-first web app for viewing **live stock and ETF prices** with
+interactive charts. Real market data, no signup, no API key required.
 
 ## Features
 
-- **28 currency pairs** across Majors, Euro Crosses, Sterling Crosses, Commodity Pairs, and Emerging Markets
-- **Auto-refresh every 15 minutes** with countdown timer
-- **1-day change** indicator with colour-coded percentage
-- **7-day sparklines** on every pair card
-- **Interactive charts** with 1W / 2W / 1M / 3M / 6M / 1Y period selectors
-- **Swipe right** to close detail panel on mobile
-- **PWA-ready** — installable as a home-screen app on iOS and Android
-- **Dark theme** optimised for AMOLED displays
-- **Search** across pair symbols and currency names
+- **Live prices** for stocks, ETFs, indices and mutual funds
+- **Search** any ticker by symbol or company name (e.g. `AAPL`, `Tesla`, `VOO`)
+- **Custom watchlist** — add/remove symbols, saved in your browser
+- **Sparklines** on every card showing the recent trend
+- **Interactive charts** with 1W / 1M / 6M / 1Y / 5Y ranges (powered by
+  TradingView Lightweight Charts)
+- **Auto-refresh** every 60 seconds, plus pull-to-refresh on focus
+- **Dark theme**, installable as a PWA
 
-## Data Sources
+## How it works
 
-| Data | Provider | Key required |
-|------|----------|--------------|
-| Live rates (refreshed hourly) | [Open Exchange Rates API](https://open.er-api.com) | No |
-| Historical / charts | [Frankfurter.app](https://www.frankfurter.app) (ECB data) | No |
-| Previous close (1D change) | Frankfurter.app | No |
+The app is a static front-end plus two tiny **Vercel serverless functions**
+that proxy [Yahoo Finance](https://finance.yahoo.com)'s public endpoints. The
+proxy is what makes this work in the browser: it adds the required headers and
+sidesteps CORS, and no API key is involved.
 
-> The live feed updates approximately every 60 minutes at the source.
-> The app polls every 15 minutes to pick up changes as soon as they publish.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/quote?symbols=AAPL,MSFT` | Batch quotes + 5-day sparkline data |
+| `GET /api/quote?symbol=AAPL&range=1y&interval=1d` | Full OHLC series for the chart |
+| `GET /api/search?q=apple` | Symbol/company search |
 
-## Hosting on GitHub Pages
+Responses are cached at the edge for ~30s (`stale-while-revalidate`) to keep
+things snappy and stay friendly to the upstream source.
 
-1. Push this branch to GitHub.
-2. Go to **Settings → Pages**.
-3. Set source to this branch, root `/`.
-4. Site will be live at `https://<user>.github.io/<repo>/`.
+> Prices may be delayed. This is for informational purposes only and is **not
+> investment advice**.
 
-## PWA Icons
+## Project structure
 
-Open `generate-icons.html` in a browser, download the two PNG files,
-save them as `icon-192.png` and `icon-512.png` in the repo root,
-then delete `generate-icons.html`.
+```
+api/
+  quote.js     # serverless: live quotes + chart history
+  search.js    # serverless: symbol search
+css/styles.css
+js/app.js      # all front-end logic
+index.html
+vercel.json
+manifest.json
+```
 
-## Local Development
+## Deploy
+
+This repo is wired to auto-deploy to Vercel. Vercel automatically detects the
+`/api` directory as serverless functions and serves the rest as static files —
+no build step required.
+
+## Local development
 
 ```bash
-npx serve .
-# or
-python3 -m http.server 8080
+npm i -g vercel
+vercel dev     # runs the static site + serverless functions locally
 ```
+
+A plain static server (`npx serve .`) will serve the UI but the `/api/*`
+routes won't work without the Vercel dev runtime.
