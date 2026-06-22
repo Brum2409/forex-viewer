@@ -1,7 +1,7 @@
 {
   "name": "Ticker — Live Stocks & ETFs",
   "short_name": "Ticker",
-  "description": "Live stock and ETF prices with interactive charts. Real market data, no signup.",
+  "description": "Live stock and ETF prices with interactive charts. Real market data, username login syncs your watchlist.",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#0b0e14",

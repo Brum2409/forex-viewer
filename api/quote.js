@@ -5,21 +5,40 @@
 //   /api/quote?symbols=AAPL,MSFT         -> compact summaries + sparkline
 //   /api/quote?symbol=AAPL&range=1y&interval=1d  -> full OHLC series
 
-const YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/";
+// Yahoo serves the same data from two hosts; we fail over between them since
+// either can intermittently return 401/429 on serverless egress IPs.
+const YF_HOSTS = [
+  "https://query1.finance.yahoo.com",
+  "https://query2.finance.yahoo.com",
+];
+const YF_CHART_PATH = "/v8/finance/chart/";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/123.0 Safari/537.36";
 
 async function fetchChart(symbol, range, interval) {
-  const url =
-    `${YF_BASE}${encodeURIComponent(symbol)}` +
+  const path =
+    `${YF_CHART_PATH}${encodeURIComponent(symbol)}` +
     `?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}` +
     `&includePrePost=false`;
 
-  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
-  if (!r.ok) throw new Error(`Yahoo responded ${r.status} for ${symbol}`);
-  const json = await r.json();
+  let lastErr;
+  let json;
+  for (const host of YF_HOSTS) {
+    try {
+      const r = await fetch(host + path, {
+        headers: { "User-Agent": UA, Accept: "application/json" },
+      });
+      if (!r.ok) throw new Error(`Yahoo responded ${r.status} for ${symbol}`);
+      json = await r.json();
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (lastErr) throw lastErr;
 
   const result = json?.chart?.result?.[0];
   if (!result) {
