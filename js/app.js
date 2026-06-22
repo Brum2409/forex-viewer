@@ -58,13 +58,135 @@ function fmtBig(n) {
   return String(n);
 }
 
+/* ── data source ─────────────────────────────
+ * On Vercel the /api/* serverless proxies are available. On GitHub Pages
+ * (and other static hosting) there is no backend, so we talk to Yahoo
+ * Finance directly from the browser through a public CORS proxy. */
+const HAS_BACKEND = !(
+  /(\.github\.io|\.githubusercontent\.com)$/i.test(location.hostname) ||
+  location.protocol === "file:"
+);
+
+const YF_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/";
+const YF_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search";
+
+// Tried in order; first one that succeeds wins.
+const CORS_PROXIES = [
+  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://thingproxy.freeboard.io/fetch/${u}`,
+];
+
+async function proxyFetchJson(targetUrl) {
+  let lastErr;
+  for (const wrap of CORS_PROXIES) {
+    try {
+      const res = await fetch(wrap(targetUrl), { headers: { Accept: "application/json" } });
+      if (!res.ok) throw new Error(`proxy ${res.status}`);
+      return await res.json();
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("all CORS proxies failed");
+}
+
+// Mirrors the normalization done server-side in api/quote.js.
+function normalizeChart(json, symbol) {
+  const result = json?.chart?.result?.[0];
+  if (!result) throw new Error(json?.chart?.error?.description || `${symbol}: no data`);
+  const meta = result.meta || {};
+  const timestamps = result.timestamp || [];
+  const q = result.indicators?.quote?.[0] || {};
+
+  const candles = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const close = q.close?.[i];
+    if (close == null) continue;
+    candles.push({
+      t: timestamps[i],
+      o: q.open?.[i] ?? close,
+      h: q.high?.[i] ?? close,
+      l: q.low?.[i] ?? close,
+      c: close,
+    });
+  }
+
+  const price = meta.regularMarketPrice ?? candles.at(-1)?.c ?? null;
+  const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? null;
+
+  return {
+    symbol: meta.symbol || symbol,
+    name: meta.longName || meta.shortName || meta.symbol || symbol,
+    currency: meta.currency || "USD",
+    exchange: meta.fullExchangeName || meta.exchangeName || "",
+    instrumentType: meta.instrumentType || "",
+    price,
+    prevClose,
+    change: price != null && prevClose != null ? price - prevClose : null,
+    changePct: price != null && prevClose ? ((price - prevClose) / prevClose) * 100 : null,
+    marketState: meta.marketState || "",
+    time: meta.regularMarketTime || null,
+    candles,
+  };
+}
+
+async function directChart(symbol, range, interval) {
+  const url =
+    `${YF_CHART_BASE}${encodeURIComponent(symbol)}` +
+    `?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}` +
+    `&includePrePost=false`;
+  return normalizeChart(await proxyFetchJson(url), symbol);
+}
+
+/* Unified data API used by the rest of the app — branches on HAS_BACKEND. */
+async function apiQuoteSingle(symbol, range, interval) {
+  if (HAS_BACKEND) {
+    const res = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}&range=${range}&interval=${interval}`);
+    if (!res.ok) throw new Error(`quote ${res.status}`);
+    return res.json();
+  }
+  return directChart(symbol, range, interval);
+}
+
+async function apiQuoteBatch(symbols, range, interval) {
+  if (HAS_BACKEND) {
+    const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(","))}&range=${range}&interval=${interval}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`quote ${res.status}`);
+    return res.json();
+  }
+  const settled = await Promise.allSettled(symbols.map((s) => directChart(s, range, interval)));
+  const quotes = [], errors = [];
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") quotes.push(r.value);
+    else errors.push({ symbol: symbols[i], error: r.reason?.message || "failed" });
+  });
+  if (!quotes.length && errors.length) throw new Error("all quotes failed");
+  return { quotes, errors };
+}
+
+async function apiSearch(q) {
+  if (HAS_BACKEND) {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    return res.json();
+  }
+  const url = `${YF_SEARCH_URL}?q=${encodeURIComponent(q)}&quotesCount=12&newsCount=0&listsCount=0`;
+  const json = await proxyFetchJson(url);
+  const allowed = new Set(["EQUITY", "ETF", "INDEX", "MUTUALFUND", "CURRENCY"]);
+  const results = (json.quotes || [])
+    .filter((x) => x.symbol && allowed.has(x.quoteType))
+    .map((x) => ({
+      symbol: x.symbol,
+      name: x.longname || x.shortname || x.symbol,
+      type: x.quoteType,
+      exchange: x.exchDisp || x.exchange || "",
+    }));
+  return { results };
+}
+
 /* ── data fetching ───────────────────────── */
 async function fetchQuotes() {
   if (!state.symbols.length) { renderList(); return; }
-  const url = `/api/quote?symbols=${encodeURIComponent(state.symbols.join(","))}&range=5d&interval=1d`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`quote ${res.status}`);
-  const data = await res.json();
+  const data = await apiQuoteBatch(state.symbols, "5d", "1d");
   (data.quotes || []).forEach((q) => state.quotes.set(q.symbol.toUpperCase(), q));
   renderList();
   setStatus(true);
@@ -152,8 +274,7 @@ async function runSearch(q) {
   box.hidden = false;
   box.innerHTML = `<div class="sr-msg">Searching…</div>`;
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    const data = await res.json();
+    const data = await apiSearch(q);
     const items = data.results || [];
     if (!items.length) { box.innerHTML = `<div class="sr-msg">No matches.</div>`; return; }
     box.innerHTML = "";
@@ -256,8 +377,7 @@ async function loadChart(range, interval) {
   $("chartLoader").hidden = false;
   ensureChart();
   try {
-    const res = await fetch(`/api/quote?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`);
-    const q = await res.json();
+    const q = await apiQuoteSingle(sym, range, interval);
     if (state.active !== sym) return; // user navigated away
     const points = (q.candles || [])
       .map((c) => ({ time: c.t, value: c.c }))
