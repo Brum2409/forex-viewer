@@ -205,7 +205,17 @@ html, body {
 }
 .ai-head { display: flex; align-items: center; justify-content: space-between; }
 .ai-title { font-size: 14px; font-weight: 700; }
-.ai-settings-btn { width: 30px; height: 30px; font-size: 15px; }
+.ai-head-btns { display: flex; gap: 6px; }
+.ai-settings-btn, .ai-clear-btn { width: 30px; height: 30px; font-size: 14px; }
+
+.ai-examples { display: flex; flex-wrap: wrap; gap: 7px; margin: 11px 0 2px; }
+.ai-examples[hidden] { display: none; }
+.ai-ex {
+  font-size: 12px; cursor: pointer; text-align: left;
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 16px; padding: 7px 12px; transition: background .15s, border-color .15s;
+}
+.ai-ex:hover { background: var(--card-2); border-color: var(--accent); }
 
 .ai-log { display: flex; flex-direction: column; gap: 7px; max-height: 230px; overflow-y: auto; margin: 10px 0; }
 .ai-log:empty { display: none; }
@@ -230,6 +240,7 @@ html, body {
   background: var(--accent); color: #04130d; border: none; transition: filter .15s;
 }
 .ai-send:hover { filter: brightness(1.06); }
+.ai-send:disabled, .ai-input:disabled { opacity: .55; cursor: default; }
 .ai-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .ai-hint:empty { display: none; }
 .ai-hint.err { color: var(--red); }

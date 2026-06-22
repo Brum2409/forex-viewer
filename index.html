@@ -77,9 +77,18 @@
       <div class="ai-box">
         <div class="ai-head">
           <span class="ai-title">✨ AI search</span>
-          <button class="icon-btn ai-settings-btn" id="aiSettingsBtn" title="AI settings">⚙︎</button>
+          <div class="ai-head-btns">
+            <button class="icon-btn ai-clear-btn" id="aiClearBtn" title="Clear conversation" hidden>🗑</button>
+            <button class="icon-btn ai-settings-btn" id="aiSettingsBtn" title="AI settings">⚙︎</button>
+          </div>
         </div>
         <div class="ai-log" id="aiLog"></div>
+        <div class="ai-examples" id="aiExamples">
+          <button class="ai-ex" type="button">Cheap US tech stocks up a lot this year</button>
+          <button class="ai-ex" type="button">Large dividend stocks yielding over 3%</button>
+          <button class="ai-ex" type="button">Today's biggest gainers under $20</button>
+          <button class="ai-ex" type="button">European value stocks with low P/E</button>
+        </div>
         <form class="ai-form" id="aiForm" autocomplete="off">
           <input id="aiInput" class="ai-input" type="text"
             placeholder="Ask AI — e.g. cheap US tech stocks up big this year" />
@@ -189,6 +198,20 @@
             </div>
           </div>
 
+          <div class="filter-row" id="peRow">
+            <label for="fPeMax">Max P/E ratio</label>
+            <div class="range-inputs">
+              <input id="fPeMax" type="number" inputmode="decimal" placeholder="e.g. 20" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <label for="fDivMin">Min dividend yield (%)</label>
+            <div class="range-inputs">
+              <input id="fDivMin" type="number" inputmode="decimal" placeholder="e.g. 3" />
+            </div>
+          </div>
+
           <div class="filter-row">
             <label for="fVol">Min. daily volume</label>
             <select id="fVol">
@@ -209,6 +232,8 @@
               <option value="price">Highest price</option>
               <option value="yeargainers">Best 1-year performers</option>
               <option value="yearlosers">Worst 1-year performers</option>
+              <option value="lowpe">Lowest P/E (value)</option>
+              <option value="dividend">Highest dividend yield</option>
             </select>
           </div>
 

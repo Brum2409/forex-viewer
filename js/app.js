@@ -506,7 +506,7 @@ function switchView(view) {
   if (view === "discover" && !state.discover.loaded) runScreen(true);
 }
 
-const SORT_VALUES = ["marketcap","gainers","losers","volume","price","yeargainers","yearlosers"];
+const SORT_VALUES = ["marketcap","gainers","losers","volume","price","yeargainers","yearlosers","lowpe","dividend"];
 const SECTOR_VALUES = [
   "Technology","Healthcare","Financial Services","Consumer Cyclical","Consumer Defensive",
   "Communication Services","Industrials","Energy","Basic Materials","Real Estate","Utilities",
@@ -519,8 +519,14 @@ const DEFAULT_SPEC = {
   priceMin: null, priceMax: null,
   dayChangeMin: null, dayChangeMax: null,
   yearChangeMin: null, yearChangeMax: null,
+  peMax: null, dividendMin: null,
   volumeMin: null, sort: "marketcap",
 };
+const RANGE_FIELDS = [
+  "marketCapMin","marketCapMax","priceMin","priceMax",
+  "dayChangeMin","dayChangeMax","yearChangeMin","yearChangeMax",
+  "peMax","dividendMin","volumeMin",
+];
 
 function numOrNull(v) {
   const s = String(v ?? "").trim();
@@ -569,6 +575,8 @@ function readForm() {
     dayChangeMax: numOrNull($("fDayMax").value),
     yearChangeMin: numOrNull($("fYearMin").value),
     yearChangeMax: numOrNull($("fYearMax").value),
+    peMax: type === "stocks" ? numOrNull($("fPeMax").value) : null,
+    dividendMin: numOrNull($("fDivMin").value),
     volumeMin: numOrNull($("fVol").value === "" ? null : (VOL_PRESETS[$("fVol").value] ?? null)),
     sort: $("fSort").value,
   };
@@ -612,6 +620,8 @@ function writeForm(spec) {
   $("fDayMax").value = spec.dayChangeMax ?? "";
   $("fYearMin").value = spec.yearChangeMin ?? "";
   $("fYearMax").value = spec.yearChangeMax ?? "";
+  $("fPeMax").value = spec.peMax ?? "";
+  $("fDivMin").value = spec.dividendMin ?? "";
   setVolControl(spec.volumeMin ?? null);
   $("fSort").value = SORT_VALUES.includes(spec.sort) ? spec.sort : "marketcap";
 }
@@ -619,8 +629,10 @@ function writeForm(spec) {
 function setType(type) {
   $("segType").querySelectorAll("button").forEach((b) =>
     b.classList.toggle("active", b.dataset.type === type));
-  // Sector only applies to individual stocks.
-  $("sectorRow").style.display = type === "stocks" ? "" : "none";
+  // Sector and P/E only apply to individual stocks.
+  const stocksOnly = type === "stocks" ? "" : "none";
+  $("sectorRow").style.display = stocksOnly;
+  $("peRow").style.display = stocksOnly;
 }
 
 function clearPresetHighlight() {
@@ -757,6 +769,10 @@ function discoverCard(q) {
     const sign = q.yearChangePct >= 0 ? "+" : "";
     tags.push(`<span class="tag ${cls}">1Y ${sign}${q.yearChangePct.toFixed(1)}%</span>`);
   }
+  if (q.peRatio != null && q.peRatio > 0) tags.push(`<span class="tag">P/E ${q.peRatio.toFixed(1)}</span>`);
+  if (q.dividendYield != null && q.dividendYield > 0) {
+    tags.push(`<span class="tag">${(q.dividendYield * 100).toFixed(2)}% yield</span>`);
+  }
 
   el.innerHTML =
     `<div class="card-left">
@@ -858,6 +874,8 @@ You must respond with JSON matching the provided schema. Choose exactly one "act
 - "curate": Hand-pick a subset of the stocks ALREADY listed below (by symbol) and put them, in your preferred order, in "visibleSymbols". Use this for follow-ups that refine what's already shown, e.g. "only the ones under $100", "hide the Chinese companies", "rank these by best value", "just the profitable-looking ones". Only use symbols that appear in the current results.
 - "none": Just answer or ask a clarifying question; change nothing.
 
+Independently of the action, you MAY set "addToWatchlist" to a list of tickers to add to the user's watchlist when they ask (e.g. "add the top 3 to my watchlist"). Use real Yahoo symbols, preferably ones in the current results.
+
 FILTER FIELDS (all optional unless noted):
 - type: "stocks" or "etfs" (required in filters).
 - region: one of us, any, gb, de, fr, ca, jp, cn, hk, in, au, nl, ch, br, kr, es, it, se. "any" = any major market. (required in filters; default us)
@@ -866,15 +884,21 @@ FILTER FIELDS (all optional unless noted):
 - priceMin / priceMax: share price in USD.
 - dayChangeMin / dayChangeMax: percent change TODAY (e.g. 5 = up 5%, -3 = down 3%).
 - yearChangeMin / yearChangeMax: percent change over the past 1 YEAR (52 weeks).
+- peMax: maximum trailing P/E ratio (stocks only; lower = cheaper/"value", e.g. 15).
+- dividendMin: minimum dividend yield in percent (e.g. 3 = at least 3%).
 - volumeMin: minimum shares traded today.
-- sort: one of marketcap, gainers (today up), losers (today down), volume, price, yeargainers (1y up), yearlosers (1y down).
+- sort: one of marketcap, gainers (today up), losers (today down), volume, price, yeargainers (1y up), yearlosers (1y down), lowpe (cheapest by P/E), dividend (highest yield).
 
-IMPORTANT: The screener can only filter on the fields above. The only performance time windows it supports are TODAY and 1 YEAR. If the user asks for a window it can't do (e.g. "up this week"/"last month"), pick the closest available window, say so in your reply, and/or use "curate" on the loaded results.
+IMPORTANT: The screener can only filter on the fields above. The only performance time windows it supports are TODAY and 1 YEAR. If the user asks for a window it can't do (e.g. "up this week"/"last month"), pick the closest available window, say so in your reply, and/or use "curate" on the loaded results. "Cheap/value" usually means low peMax (and sort lowpe); "income/safe dividend" means dividendMin (and sort dividend).
+
+QUALITY: The market includes many illiquid micro-caps with unreliable data. Unless the user explicitly wants small/obscure names, add a sensible floor (e.g. marketCapMin around 1e9 and volumeMin around 100000) — especially for value (lowpe) or dividend searches — so results are real, tradable companies.
 
 CURRENT FILTERS:
 ${JSON.stringify(spec)}
 
-CURRENT RESULTS ON SCREEN (${visibleItems().length} shown; reason over these for "curate"; divYield is a %, marketCap/volume are absolute):
+USER'S WATCHLIST: ${state.symbols.length ? state.symbols.join(", ") : "(empty)"}
+
+CURRENT RESULTS ON SCREEN (${visibleItems().length} shown; reason over these for "curate"; pe is trailing P/E, divYield is a %, marketCap/volume are absolute):
 ${JSON.stringify(aiResultsContext())}`;
 }
 
@@ -895,11 +919,13 @@ function aiResponseSchema() {
           priceMin: NUM, priceMax: NUM,
           dayChangeMin: NUM, dayChangeMax: NUM,
           yearChangeMin: NUM, yearChangeMax: NUM,
+          peMax: NUM, dividendMin: NUM,
           volumeMin: NUM,
           sort: { type: "STRING", enum: SORT_VALUES },
         },
       },
       visibleSymbols: { type: "ARRAY", items: { type: "STRING" } },
+      addToWatchlist: { type: "ARRAY", items: { type: "STRING" } },
     },
     required: ["reply", "action"],
   };
@@ -911,10 +937,11 @@ function sanitizeSpec(filters) {
   spec.type = f.type === "etfs" ? "etfs" : "stocks";
   spec.region = REGION_VALUES.includes(f.region) ? f.region : "us";
   spec.sector = spec.type === "stocks" && SECTOR_VALUES.includes(f.sector) ? f.sector : null;
-  for (const k of ["marketCapMin","marketCapMax","priceMin","priceMax","dayChangeMin","dayChangeMax","yearChangeMin","yearChangeMax","volumeMin"]) {
+  for (const k of RANGE_FIELDS) {
     const n = Number(f[k]);
     spec[k] = Number.isFinite(n) ? n : null;
   }
+  if (spec.type !== "stocks") spec.peMax = null; // P/E is a stock metric
   spec.sort = SORT_VALUES.includes(f.sort) ? f.sort : "marketcap";
   return spec;
 }
@@ -936,6 +963,25 @@ function applyAICuration(symbols) {
   syncDiscoverAddButtons();
 }
 
+// Add several symbols to the watchlist in one pass (used by the AI helper).
+async function addSymbolsBatch(symbols) {
+  let added = false;
+  for (const s of symbols || []) {
+    const sym = String(s).toUpperCase();
+    if (/^[A-Z0-9.^=-]{1,15}$/.test(sym) && !state.symbols.includes(sym)) {
+      state.symbols.push(sym);
+      added = true;
+    }
+  }
+  if (added) {
+    save();
+    renderList();
+    syncDiscoverAddButtons();
+    try { await fetchQuotes(); } catch (_) {}
+  }
+  return added;
+}
+
 function renderAILog() {
   const log = $("aiLog");
   log.innerHTML = "";
@@ -952,12 +998,35 @@ function renderAILog() {
     log.appendChild(row);
   }
   log.scrollTop = log.scrollHeight;
+
+  const hasChat = state.ai.history.length > 0;
+  $("aiExamples").hidden = hasChat;
+  $("aiClearBtn").hidden = !hasChat || state.ai.busy;
+}
+
+function setAIBusy(busy) {
+  state.ai.busy = busy;
+  $("aiInput").disabled = busy;
+  $("aiSend").disabled = busy;
+}
+
+function clearAIChat() {
+  state.ai.history = [];
+  setAIHint("");
+  renderAILog();
 }
 
 function setAIHint(msg, isErr) {
   const el = $("aiHint");
   el.textContent = msg || "";
   el.classList.toggle("err", Boolean(isErr));
+}
+
+// thinkingConfig is only valid for thinking-capable models, and only the Flash
+// tiers allow a budget of 0 (Pro requires a minimum). Gate on the model name so
+// we never send an invalid value.
+function modelThinkingBudget(model) {
+  return /gemini-(2\.5|3)[a-z0-9.-]*flash/.test(model || "") ? 0 : undefined;
 }
 
 async function aiSend(text) {
@@ -974,7 +1043,7 @@ async function aiSend(text) {
   }
 
   state.ai.history.push({ role: "user", text: msg });
-  state.ai.busy = true;
+  setAIBusy(true);
   setAIHint("");
   renderAILog();
 
@@ -982,22 +1051,25 @@ async function aiSend(text) {
     role: m.role === "user" ? "user" : "model",
     parts: [{ text: m.text }],
   }));
+  const model = state.ai.model || DEFAULT_MODEL;
 
   try {
     const data = await apiAI({
       action: "generate",
-      model: state.ai.model || DEFAULT_MODEL,
+      model,
       systemInstruction: buildSystemPrompt(),
       contents,
       responseSchema: aiResponseSchema(),
       temperature: 0.2,
+      maxOutputTokens: 4096,
+      thinkingBudget: modelThinkingBudget(model),
     });
 
     let parsed;
     try { parsed = JSON.parse(data.text); } catch (_) { parsed = { reply: data.text, action: "none" }; }
 
     state.ai.history.push({ role: "model", text: parsed.reply || "Done." });
-    state.ai.busy = false;
+    setAIBusy(false);
     renderAILog();
 
     if (parsed.action === "filter" && parsed.filters) {
@@ -1005,8 +1077,11 @@ async function aiSend(text) {
     } else if (parsed.action === "curate" && Array.isArray(parsed.visibleSymbols)) {
       applyAICuration(parsed.visibleSymbols);
     }
+    if (Array.isArray(parsed.addToWatchlist) && parsed.addToWatchlist.length) {
+      addSymbolsBatch(parsed.addToWatchlist);
+    }
   } catch (e) {
-    state.ai.busy = false;
+    setAIBusy(false);
     // Drop the optimistic user turn so a retry isn't doubled up.
     if (state.ai.history.at(-1)?.role === "user") state.ai.history.pop();
     renderAILog();
@@ -1295,6 +1370,11 @@ function init() {
     aiSend(v);
   });
   $("aiSettingsBtn").addEventListener("click", openAISettings);
+  $("aiClearBtn").addEventListener("click", clearAIChat);
+  $("aiExamples").addEventListener("click", (e) => {
+    const btn = e.target.closest(".ai-ex");
+    if (btn) aiSend(btn.textContent);
+  });
   $("aiCloseSettings").addEventListener("click", () => { $("aiSettings").hidden = true; });
   $("aiSaveSettings").addEventListener("click", saveAISettings);
   $("aiModelSelect").addEventListener("change", commitModelChoice);

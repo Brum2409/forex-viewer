@@ -11,12 +11,14 @@ interactive charts. Real market data, no API key required. Sign in with just a
 - **Discover** — a powerful screener over the whole market: one-tap quick picks
   (top gainers/losers, most active, large caps, best/worst 1-year performers)
   plus easy advanced filters by country, sector, company size, price,
-  performance (today & 1-year) and volume
+  performance (today & 1-year), **valuation (max P/E)**, **dividend yield** and
+  volume — sortable by gainers, value (lowest P/E), highest yield, and more
 - **AI search helper** — describe what you want in plain English and the AI sets
-  the filters for you, or hand-picks from the current results for follow-ups
+  the filters for you, hand-picks from the current results for follow-ups
   ("only the ones under $100", "hide the Chinese companies", "rank these by
-  value"). Powered by Google Gemini with your own free API key and a
-  model picker
+  value"), and can even **add picks to your watchlist** ("add the top 3").
+  Powered by Google Gemini with your own free API key, a model picker, example
+  prompts, and a clearable conversation
 - **Live prices** for stocks, ETFs, indices and mutual funds
 - **Search** any ticker by symbol or company name (e.g. `AAPL`, `Tesla`, `VOO`)
 - **Custom watchlist** — add/remove symbols, saved per account
@@ -92,6 +94,11 @@ exchange, region). Gemini replies with **structured JSON** (enforced via
   hand-picks/hides results client-side (great for follow-ups the screener can't
   express). A "Show all" chip clears the selection.
 - **none** — just a reply / clarifying question.
+
+Any reply may also include **addToWatchlist** (a list of tickers) so the AI can
+add picks to your watchlist on request. Thinking-capable Flash models are run
+with a zero thinking budget for fast, reliable JSON; the request also caps
+output tokens so longer curation lists aren't truncated.
 
 **API key:** get a free one at
 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it

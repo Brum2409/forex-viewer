@@ -33,6 +33,8 @@ const SORTS = {
   price:      ["intradayprice", "DESC"],
   yeargainers:["fiftytwowkpercentchange", "DESC"],
   yearlosers: ["fiftytwowkpercentchange", "ASC"],
+  lowpe:      ["peratio.lasttwelvemonths", "ASC"],
+  dividend:   ["forward_dividend_yield", "DESC"],
 };
 
 /* ── Yahoo auth (crumb + cookie), cached while the function stays warm ── */
@@ -135,6 +137,19 @@ function buildPayload(spec) {
 
   const vol = clampNum(spec.volumeMin);
   if (vol != null) operands.push({ operator: "gt", operands: ["dayvolume", vol] });
+
+  // Valuation filters. P/E is an equity metric (ignored by Yahoo for ETFs).
+  if (quoteType === "EQUITY") {
+    const pe = clampNum(spec.peMax);
+    if (pe != null) operands.push({ operator: "lt", operands: ["peratio.lasttwelvemonths", pe] });
+  }
+  const dy = clampNum(spec.dividendMin);
+  if (dy != null) operands.push({ operator: "gt", operands: ["forward_dividend_yield", dy] });
+
+  // When ranking by lowest P/E, exclude loss-making / undefined P/E names.
+  if (spec.sort === "lowpe" && quoteType === "EQUITY") {
+    operands.push({ operator: "gt", operands: ["peratio.lasttwelvemonths", 0] });
+  }
 
   let [sortField, sortType] = SORTS[spec.sort] || SORTS.marketcap;
   if (sortField === "intradaymarketcap") sortField = capField; // ETFs use fundnetassets

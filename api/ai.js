@@ -51,6 +51,9 @@ async function generate(key, body) {
   }
   if (typeof body.temperature === "number") gc.temperature = body.temperature;
   if (typeof body.maxOutputTokens === "number") gc.maxOutputTokens = body.maxOutputTokens;
+  // Only sent for thinking-capable models (2.5/3); avoids tokens being spent on
+  // reasoning instead of the JSON answer. Caller decides when to include it.
+  if (typeof body.thinkingBudget === "number") gc.thinkingConfig = { thinkingBudget: body.thinkingBudget };
   if (Object.keys(gc).length) payload.generationConfig = gc;
 
   const r = await fetch(
@@ -105,9 +108,9 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "unknown_action" });
   } catch (err) {
     const msg = err.message || "ai_error";
-    // Surface auth problems distinctly so the UI can prompt for a new key.
-    const status = /api key|permission|invalid|unauthor|403|400/i.test(msg) ? 401 : 502;
-    return res.status(status).json({ error: msg });
+    // Surface auth/key problems distinctly so the UI can prompt for a new key.
+    const isAuth = /api[_ ]?key|permission|unauthor|forbidden|401|403/i.test(msg);
+    return res.status(isAuth ? 401 : 502).json({ error: msg });
   }
 }
 
