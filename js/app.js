@@ -7,31 +7,166 @@ const DEFAULT_WATCHLIST = [
   "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "TSLA", "META",
   "SPY", "QQQ", "VOO", "VTI",
 ];
-const STORAGE_KEY = "ticker.watchlist.v1";
+const USER_KEY = "ticker.user";
+const LEGACY_WATCHLIST_KEY = "ticker.watchlist.v1";
 const REFRESH_MS = 60_000;
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  symbols: load(),
+  user: null,          // logged-in username, or null
+  cloud: false,        // true once a save has synced to the server
+  symbols: [],         // current watchlist
   quotes: new Map(),   // symbol -> quote object
   active: null,        // symbol shown in detail sheet
   refreshTimer: null,
+  saveTimer: null,
 };
 
-/* ── persistence ─────────────────────────── */
-function load() {
+/* ── username helpers ────────────────────── */
+function normalizeUser(raw) {
+  const name = String(raw || "").trim().toLowerCase();
+  return /^[a-z0-9_.-]{2,24}$/.test(name) ? name : null;
+}
+const watchlistKey = (user) => `ticker.watchlist.${user}`;
+
+/* ── local persistence (offline + fallback) ─ */
+function loadLocal(user) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(watchlistKey(user));
     if (raw) {
       const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+    // Migrate a pre-accounts watchlist into the first account that logs in.
+    const legacy = localStorage.getItem(LEGACY_WATCHLIST_KEY);
+    if (legacy) {
+      const arr = JSON.parse(legacy);
       if (Array.isArray(arr) && arr.length) return arr;
     }
   } catch (_) {}
-  return [...DEFAULT_WATCHLIST];
+  return null;
 }
+function saveLocal() {
+  if (!state.user) return;
+  try {
+    localStorage.setItem(watchlistKey(state.user), JSON.stringify(state.symbols));
+  } catch (_) {}
+}
+
+/* Persist the watchlist locally now and to the cloud (debounced). */
 function save() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.symbols)); } catch (_) {}
+  saveLocal();
+  clearTimeout(state.saveTimer);
+  state.saveTimer = setTimeout(saveCloud, 600);
+}
+
+async function saveCloud() {
+  if (!state.user) return;
+  try {
+    const res = await fetch("/api/account", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: state.user, watchlist: state.symbols }),
+    });
+    if (res.ok) {
+      state.cloud = true;
+    } else if (res.status === 503) {
+      state.cloud = false; // cloud sync not configured — local only
+    }
+  } catch (_) {
+    /* offline — local copy is already saved */
+  }
+}
+
+/* ── auth / session ──────────────────────── */
+// Pull the watchlist for a user from the cloud, falling back to the local copy
+// (or the defaults) when cloud sync is unavailable.
+async function fetchWatchlist(user) {
+  try {
+    const res = await fetch(`/api/account?user=${encodeURIComponent(user)}`);
+    if (res.ok) {
+      const data = await res.json();
+      state.cloud = true;
+      return Array.isArray(data.watchlist) ? data.watchlist : [];
+    }
+    // 503 => storage not configured; anything else => fall through to local.
+  } catch (_) {
+    /* offline */
+  }
+  state.cloud = false;
+  return loadLocal(user) || [...DEFAULT_WATCHLIST];
+}
+
+async function login(rawName) {
+  const user = normalizeUser(rawName);
+  if (!user) {
+    setLoginHint("Use 2–24 letters, numbers, . _ or -.", true);
+    return;
+  }
+  const btn = $("loginBtn");
+  btn.disabled = true;
+  btn.textContent = "Loading…";
+  setLoginHint("");
+
+  state.user = user;
+  try { localStorage.setItem(USER_KEY, user); } catch (_) {}
+
+  state.symbols = await fetchWatchlist(user);
+  saveLocal(); // keep a local mirror
+
+  btn.disabled = false;
+  btn.textContent = "Continue";
+  enterApp();
+}
+
+function logout() {
+  clearTimeout(state.saveTimer);
+  clearInterval(state.refreshTimer);
+  state.refreshTimer = null;
+  try { localStorage.removeItem(USER_KEY); } catch (_) {}
+  state.user = null;
+  state.cloud = false;
+  state.symbols = [];
+  state.quotes.clear();
+  closeDetail();
+  $("accountOverlay").hidden = true;
+  $("app").hidden = true;
+  $("userChip").hidden = true;
+  $("login").hidden = false;
+  $("loginInput").value = "";
+  setLoginHint("No password — just a name to save your list under.");
+  $("loginInput").focus();
+}
+
+function setLoginHint(msg, isErr) {
+  const el = $("loginHint");
+  el.textContent = msg;
+  el.classList.toggle("err", Boolean(isErr));
+}
+
+// Reveal the main app for the logged-in user and kick off data loading.
+function enterApp() {
+  $("login").hidden = true;
+  $("app").hidden = false;
+  renderUser();
+  renderList();
+  refresh(false);
+  clearInterval(state.refreshTimer);
+  state.refreshTimer = setInterval(() => refresh(false), REFRESH_MS);
+}
+
+function renderUser() {
+  if (!state.user) return;
+  const initial = state.user[0].toUpperCase();
+  $("userAvatar").textContent = initial;
+  $("userName").textContent = state.user;
+  $("userChip").hidden = false;
+  $("accountAvatar").textContent = initial;
+  $("accountUser").textContent = state.user;
+  $("accountSync").textContent = state.cloud
+    ? "✓ Synced to the cloud"
+    : "Saved on this device";
 }
 
 /* ── formatting ──────────────────────────── */
@@ -454,6 +589,21 @@ function escapeHtml(s) {
 
 /* ── wire up ─────────────────────────────── */
 function init() {
+  // Auth UI.
+  $("loginForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    login($("loginInput").value);
+  });
+  $("userChip").addEventListener("click", () => {
+    renderUser();
+    $("accountOverlay").hidden = false;
+  });
+  $("accountOverlay").addEventListener("click", (e) => {
+    if (e.target.id === "accountOverlay") $("accountOverlay").hidden = true;
+  });
+  $("logoutBtn").addEventListener("click", logout);
+
+  // App UI.
   $("searchInput").addEventListener("input", (e) => onSearchInput(e.target.value));
   $("refreshBtn").addEventListener("click", () => refresh(true));
   $("backBtn").addEventListener("click", closeDetail);
@@ -464,7 +614,11 @@ function init() {
     }
   });
   $("overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") closeDetail(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("overlay").hidden) closeDetail(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("overlay").hidden) closeDetail();
+    else if (!$("accountOverlay").hidden) $("accountOverlay").hidden = true;
+  });
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".search-wrap")) hideSearch();
   });
@@ -475,13 +629,19 @@ function init() {
     btn.classList.add("active");
     loadChart(btn.dataset.range, btn.dataset.interval);
   });
-
-  renderList();
-  refresh(false);
-  state.refreshTimer = setInterval(() => refresh(false), REFRESH_MS);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refresh(false);
+    if (!document.hidden && state.user) refresh(false);
   });
+
+  // Resume a saved session, otherwise show the login gate.
+  let saved = null;
+  try { saved = normalizeUser(localStorage.getItem(USER_KEY)); } catch (_) {}
+  if (saved) {
+    login(saved);
+  } else {
+    $("login").hidden = false;
+    $("loginInput").focus();
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

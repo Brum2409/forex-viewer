@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0b0e14" />
-  <meta name="description" content="Live stock & ETF prices with interactive charts — real market data, no signup." />
+  <meta name="description" content="Live stock & ETF prices with interactive charts — real market data, sign in with just a username to sync your watchlist." />
   <title>Ticker — Live Stocks & ETFs</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2316c784'/%3E%3Cpath d='M20 65 L40 45 L55 58 L80 30' stroke='%230b0e14' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
@@ -13,7 +13,24 @@
 </head>
 
 <body>
-<div class="app">
+
+<!-- Login gate -->
+<div class="login" id="login" hidden>
+  <div class="login-card">
+    <div class="login-logo">📈</div>
+    <h1 class="login-title">Ticker</h1>
+    <p class="login-sub">Pick a username to load your watchlist on any device.</p>
+    <form class="login-form" id="loginForm" autocomplete="off">
+      <input id="loginInput" class="login-input" type="text" name="username"
+        placeholder="Username" maxlength="24" autocomplete="username"
+        autocapitalize="none" spellcheck="false" />
+      <button type="submit" class="login-btn" id="loginBtn">Continue</button>
+    </form>
+    <div class="login-hint" id="loginHint">No password — just a name to save your list under.</div>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
   <header class="header">
     <div class="brand">
       <div class="brand-icon">📈</div>
@@ -23,6 +40,10 @@
       <span class="dot" id="liveDot"></span>
       <span id="statusTxt" class="status-txt">Loading…</span>
       <button class="icon-btn" id="refreshBtn" title="Refresh">↻</button>
+      <button class="user-chip" id="userChip" title="Account" hidden>
+        <span class="user-avatar" id="userAvatar">?</span>
+        <span class="user-name" id="userName">—</span>
+      </button>
     </div>
   </header>
 
@@ -43,6 +64,16 @@
   <footer class="footer">
     Data via Yahoo Finance · prices may be delayed · not investment advice
   </footer>
+</div>
+
+<!-- Account menu -->
+<div class="overlay account-overlay" id="accountOverlay" hidden>
+  <div class="account-sheet">
+    <div class="account-avatar" id="accountAvatar">?</div>
+    <div class="account-user" id="accountUser">—</div>
+    <div class="account-sync" id="accountSync">—</div>
+    <button class="account-logout" id="logoutBtn">Log out</button>
+  </div>
 </div>
 
 <!-- Detail overlay -->
