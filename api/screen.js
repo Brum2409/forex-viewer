@@ -166,9 +166,16 @@ function normalizeQuote(q) {
     yearChangePct: num(q.fiftyTwoWeekChangePercent) ?? null,
     marketCap: num(q.marketCap) ?? num(q.netAssets) ?? null,
     volume: num(q.regularMarketVolume) ?? null,
+    avgVolume: num(q.averageDailyVolume3Month) ?? null,
+    peRatio: num(q.trailingPE) ?? null,
+    dividendYield: num(q.trailingAnnualDividendYield) ?? null,
+    fiftyTwoWeekHigh: num(q.fiftyTwoWeekHigh) ?? null,
+    fiftyTwoWeekLow: num(q.fiftyTwoWeekLow) ?? null,
     currency: q.currency || "USD",
     exchange: q.fullExchangeName || q.exchange || "",
+    region: q.region || "",
     sector: q.sector || "",
+    industry: q.industry || "",
     type: q.quoteType || "",
   };
 }

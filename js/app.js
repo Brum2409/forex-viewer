@@ -23,11 +23,20 @@ const state = {
   saveTimer: null,
   view: "watchlist",   // "watchlist" | "discover"
   discover: {          // screener (Discover tab) state
+    spec: null,        // active filter spec (source of truth)
     items: [],
     total: 0,
     size: 50,
     loading: false,
     loaded: false,
+    curation: null,    // AI-selected ordered symbols, or null = show all
+  },
+  ai: {                // AI search helper
+    key: "",
+    model: "",
+    models: [],
+    history: [],       // [{ role:"user"|"model", text }]
+    busy: false,
   },
 };
 
@@ -497,9 +506,21 @@ function switchView(view) {
   if (view === "discover" && !state.discover.loaded) runScreen(true);
 }
 
-function currentType() {
-  return $("segType").querySelector(".active")?.dataset.type || "stocks";
-}
+const SORT_VALUES = ["marketcap","gainers","losers","volume","price","yeargainers","yearlosers"];
+const SECTOR_VALUES = [
+  "Technology","Healthcare","Financial Services","Consumer Cyclical","Consumer Defensive",
+  "Communication Services","Industrials","Energy","Basic Materials","Real Estate","Utilities",
+];
+const REGION_VALUES = ["us","any","gb","de","fr","ca","jp","cn","hk","in","au","nl","ch","br","kr","es","it","se"];
+
+const DEFAULT_SPEC = {
+  type: "stocks", region: "us", sector: null,
+  marketCapMin: null, marketCapMax: null,
+  priceMin: null, priceMax: null,
+  dayChangeMin: null, dayChangeMax: null,
+  yearChangeMin: null, yearChangeMax: null,
+  volumeMin: null, sort: "marketcap",
+};
 
 function numOrNull(v) {
   const s = String(v ?? "").trim();
@@ -508,26 +529,91 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function buildSpec(offset) {
-  const type = currentType();
-  const cap = CAP_PRESETS[$("fCap").value];
+function fmtCap(n) {
+  if (n == null) return "";
+  const a = Math.abs(n);
+  if (a >= 1e12) return "$" + (n / 1e12).toFixed(1).replace(/\.0$/, "") + "T";
+  if (a >= 1e9)  return "$" + (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  if (a >= 1e6)  return "$" + (n / 1e6).toFixed(0) + "M";
+  return "$" + n;
+}
+function capLabel(min, max) {
+  if (min != null && max != null) return `${fmtCap(min)}–${fmtCap(max)}`;
+  if (min != null) return `over ${fmtCap(min)}`;
+  if (max != null) return `under ${fmtCap(max)}`;
+  return "Custom";
+}
+
+/* The form is just an editor for state.discover.spec; the AI edits the same
+ * spec. readForm/writeForm keep the two in sync (both directions). */
+function readForm() {
+  const type = $("segType").querySelector(".active")?.dataset.type || "stocks";
+  let capMin = null, capMax = null;
+  const capVal = $("fCap").value;
+  if (capVal === "custom") {
+    const o = $("fCap").querySelector('option[value="custom"]');
+    capMin = o?.dataset.min ? Number(o.dataset.min) : null;
+    capMax = o?.dataset.max ? Number(o.dataset.max) : null;
+  } else if (CAP_PRESETS[capVal]) {
+    [capMin, capMax] = CAP_PRESETS[capVal];
+  }
   return {
     type,
     region: $("fRegion").value,
     sector: type === "stocks" ? ($("fSector").value || null) : null,
-    marketCapMin: cap ? cap[0] : null,
-    marketCapMax: cap ? cap[1] : null,
+    marketCapMin: capMin,
+    marketCapMax: capMax,
     priceMin: numOrNull($("fPriceMin").value),
     priceMax: numOrNull($("fPriceMax").value),
     dayChangeMin: numOrNull($("fDayMin").value),
     dayChangeMax: numOrNull($("fDayMax").value),
     yearChangeMin: numOrNull($("fYearMin").value),
     yearChangeMax: numOrNull($("fYearMax").value),
-    volumeMin: VOL_PRESETS[$("fVol").value] ?? null,
+    volumeMin: numOrNull($("fVol").value === "" ? null : (VOL_PRESETS[$("fVol").value] ?? null)),
     sort: $("fSort").value,
-    size: state.discover.size,
-    offset: offset || 0,
   };
+}
+
+function setCapControl(min, max) {
+  const sel = $("fCap");
+  const existing = sel.querySelector('option[value="custom"]');
+  let match = "";
+  for (const [k, [lo, hi]] of Object.entries(CAP_PRESETS)) {
+    if ((lo ?? null) === (min ?? null) && (hi ?? null) === (max ?? null)) { match = k; break; }
+  }
+  if (match || (min == null && max == null)) {
+    if (existing) existing.remove();
+    sel.value = match;
+  } else {
+    const label = capLabel(min, max);
+    const opt = existing || document.createElement("option");
+    opt.value = "custom";
+    opt.textContent = `Custom (${label})`;
+    opt.dataset.min = min ?? "";
+    opt.dataset.max = max ?? "";
+    if (!existing) sel.appendChild(opt);
+    sel.value = "custom";
+  }
+}
+
+function setVolControl(min) {
+  const map = { 100000: "100k", 1000000: "1m", 10000000: "10m" };
+  $("fVol").value = min != null && map[min] ? map[min] : "";
+}
+
+function writeForm(spec) {
+  setType(spec.type || "stocks");
+  $("fRegion").value = REGION_VALUES.includes(spec.region) ? spec.region : "us";
+  $("fSector").value = spec.sector && SECTOR_VALUES.includes(spec.sector) ? spec.sector : "";
+  setCapControl(spec.marketCapMin ?? null, spec.marketCapMax ?? null);
+  $("fPriceMin").value = spec.priceMin ?? "";
+  $("fPriceMax").value = spec.priceMax ?? "";
+  $("fDayMin").value = spec.dayChangeMin ?? "";
+  $("fDayMax").value = spec.dayChangeMax ?? "";
+  $("fYearMin").value = spec.yearChangeMin ?? "";
+  $("fYearMax").value = spec.yearChangeMax ?? "";
+  setVolControl(spec.volumeMin ?? null);
+  $("fSort").value = SORT_VALUES.includes(spec.sort) ? spec.sort : "marketcap";
 }
 
 function setType(type) {
@@ -537,30 +623,31 @@ function setType(type) {
   $("sectorRow").style.display = type === "stocks" ? "" : "none";
 }
 
-function resetFilters() {
-  setType("stocks");
-  $("fRegion").value = "us";
-  $("fSector").value = "";
-  $("fCap").value = "";
-  ["fPriceMin","fPriceMax","fDayMin","fDayMax","fYearMin","fYearMax"].forEach((id) => ($(id).value = ""));
-  $("fVol").value = "";
-  $("fSort").value = "marketcap";
+function clearPresetHighlight() {
   $("presetRow").querySelectorAll(".preset").forEach((p) => p.classList.remove("active"));
 }
 
-// One-tap shortcuts that configure the filter form, then run.
+function resetFilters() {
+  state.discover.spec = { ...DEFAULT_SPEC };
+  writeForm(state.discover.spec);
+  clearPresetHighlight();
+}
+
+const PRESET_SPECS = {
+  gainers:  { ...DEFAULT_SPEC, sort: "gainers",     dayChangeMin: 2 },
+  losers:   { ...DEFAULT_SPEC, sort: "losers",      dayChangeMax: -2 },
+  active:   { ...DEFAULT_SPEC, sort: "volume" },
+  large:    { ...DEFAULT_SPEC, sort: "marketcap",   marketCapMin: 10e9, marketCapMax: 200e9 },
+  yearup:   { ...DEFAULT_SPEC, sort: "yeargainers", yearChangeMin: 20 },
+  yeardown: { ...DEFAULT_SPEC, sort: "yearlosers",  yearChangeMax: -20 },
+};
+
+// One-tap shortcuts that set the spec, sync the form, then run.
 function applyPreset(preset) {
-  resetFilters();
-  const cfg = {
-    gainers:  { fSort: "gainers",     fDayMin: "2" },
-    losers:   { fSort: "losers",      fDayMax: "-2" },
-    active:   { fSort: "volume" },
-    large:    { fSort: "marketcap",   fCap: "large" },
-    yearup:   { fSort: "yeargainers", fYearMin: "20" },
-    yeardown: { fSort: "yearlosers",  fYearMax: "-20" },
-  }[preset];
-  if (!cfg) return;
-  for (const [id, val] of Object.entries(cfg)) $(id).value = val;
+  const spec = PRESET_SPECS[preset];
+  if (!spec) return;
+  state.discover.spec = { ...spec };
+  writeForm(state.discover.spec);
   $("presetRow").querySelectorAll(".preset").forEach((p) =>
     p.classList.toggle("active", p.dataset.preset === preset));
   runScreen(true);
@@ -573,12 +660,14 @@ function setDiscoverStatus(msg) {
 async function runScreen(reset) {
   const d = state.discover;
   if (d.loading) return;
+  if (!d.spec) d.spec = readForm();
   d.loading = true;
   d.loaded = true;
 
   if (reset) {
     d.items = [];
     d.total = 0;
+    d.curation = null; // a fresh search clears any AI hand-selection
     $("loadMore").hidden = true;
     renderDiscover();
     setDiscoverStatus("Searching the market…");
@@ -587,16 +676,13 @@ async function runScreen(reset) {
   }
 
   try {
-    const data = await apiScreen(buildSpec(reset ? 0 : d.items.length));
+    const spec = { ...d.spec, size: d.size, offset: reset ? 0 : d.items.length };
+    const data = await apiScreen(spec);
     const incoming = data.quotes || [];
     d.total = data.total || d.items.length + incoming.length;
     d.items = reset ? incoming : d.items.concat(incoming);
+    d.loading = false;
     renderDiscover();
-    if (!d.items.length) {
-      setDiscoverStatus("No matches — try widening your filters.");
-    } else {
-      setDiscoverStatus(`Showing ${d.items.length} of ${d.total.toLocaleString()} matches`);
-    }
     $("loadMore").hidden = !incoming.length || d.items.length >= d.total;
   } catch (e) {
     if (!HAS_BACKEND) {
@@ -610,10 +696,40 @@ async function runScreen(reset) {
   }
 }
 
+// Items currently visible, honoring an AI hand-selection (curation) if active.
+function visibleItems() {
+  const d = state.discover;
+  if (!d.curation) return d.items;
+  const bySym = new Map(d.items.map((q) => [q.symbol.toUpperCase(), q]));
+  return d.curation.map((s) => bySym.get(String(s).toUpperCase())).filter(Boolean);
+}
+
 function renderDiscover() {
   const root = $("discoverResults");
+  const items = visibleItems();
   root.innerHTML = "";
-  for (const q of state.discover.items) root.appendChild(discoverCard(q));
+  for (const q of items) root.appendChild(discoverCard(q));
+
+  const d = state.discover;
+  if (d.curation) {
+    $("curationBar").hidden = false;
+    $("curationText").textContent = `✨ AI is showing ${items.length} hand-picked of ${d.items.length} loaded`;
+  } else {
+    $("curationBar").hidden = true;
+  }
+
+  if (!d.items.length) {
+    setDiscoverStatus(d.loading ? "Searching the market…" : "No matches — try widening your filters.");
+  } else if (d.curation) {
+    setDiscoverStatus("");
+  } else {
+    setDiscoverStatus(`Showing ${d.items.length} of ${d.total.toLocaleString()} matches`);
+  }
+}
+
+function clearCuration() {
+  state.discover.curation = null;
+  renderDiscover();
 }
 
 function syncDiscoverAddButtons() {
@@ -666,6 +782,296 @@ function discoverCard(q) {
     syncDiscoverAddButtons();
   };
   return el;
+}
+
+/* ── AI search helper (Google Gemini) ────── */
+const AI_KEY_LS = "ticker.ai.key";
+const AI_MODEL_LS = "ticker.ai.model";
+const DEFAULT_MODEL = "gemini-2.5-flash";
+
+function loadAISettings() {
+  try {
+    state.ai.key = localStorage.getItem(AI_KEY_LS) || "";
+    state.ai.model = localStorage.getItem(AI_MODEL_LS) || "";
+  } catch (_) {}
+}
+
+async function apiAI(body) {
+  const res = await fetch("/api/ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, apiKey: state.ai.key || undefined }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `ai ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+async function aiFetchModels() {
+  const data = await apiAI({ action: "models" });
+  state.ai.models = data.models || [];
+  const known = state.ai.models.some((m) => m.id === state.ai.model);
+  if ((!state.ai.model || !known) && state.ai.models.length) {
+    const preferred =
+      state.ai.models.find((m) => m.id === DEFAULT_MODEL) ||
+      state.ai.models.find((m) => /2\.5-flash$/.test(m.id)) ||
+      state.ai.models.find((m) => /flash/.test(m.id)) ||
+      state.ai.models[0];
+    state.ai.model = preferred.id;
+    try { localStorage.setItem(AI_MODEL_LS, state.ai.model); } catch (_) {}
+  }
+  return state.ai.models;
+}
+
+// Compact snapshot of the currently visible stocks for the model to reason over.
+function aiResultsContext() {
+  const round = (v, d = 2) => (v == null ? null : Number(v.toFixed(d)));
+  return visibleItems().slice(0, 60).map((q) => ({
+    symbol: q.symbol,
+    name: q.name,
+    price: round(q.price),
+    todayPct: round(q.changePct),
+    yearPct: round(q.yearChangePct, 1),
+    marketCap: q.marketCap ?? null,
+    pe: round(q.peRatio, 1),
+    divYield: q.dividendYield != null ? round(q.dividendYield * 100, 2) : null,
+    volume: q.volume ?? null,
+    sector: q.sector || null,
+    exchange: q.exchange || null,
+    region: q.region || null,
+    type: q.type || null,
+  }));
+}
+
+function buildSystemPrompt() {
+  const spec = state.discover.spec || DEFAULT_SPEC;
+  return `You are the AI search assistant inside "Ticker", an app for discovering stocks and ETFs.
+You help the user find and narrow investments by either (A) editing the market screener filters, or (B) hand-picking from the stocks currently on screen. Always reply briefly and helpfully.
+
+You must respond with JSON matching the provided schema. Choose exactly one "action":
+
+- "filter": Re-run the screener across the WHOLE market with a new filter set. Put the COMPLETE desired filter state in "filters" (omit a field to mean "no filter on it"). Use this for broad requests like "cheap US tech stocks up a lot this year" or "large European dividend ETFs".
+- "curate": Hand-pick a subset of the stocks ALREADY listed below (by symbol) and put them, in your preferred order, in "visibleSymbols". Use this for follow-ups that refine what's already shown, e.g. "only the ones under $100", "hide the Chinese companies", "rank these by best value", "just the profitable-looking ones". Only use symbols that appear in the current results.
+- "none": Just answer or ask a clarifying question; change nothing.
+
+FILTER FIELDS (all optional unless noted):
+- type: "stocks" or "etfs" (required in filters).
+- region: one of us, any, gb, de, fr, ca, jp, cn, hk, in, au, nl, ch, br, kr, es, it, se. "any" = any major market. (required in filters; default us)
+- sector (stocks only): exactly one of: Technology, Healthcare, Financial Services, Consumer Cyclical, Consumer Defensive, Communication Services, Industrials, Energy, Basic Materials, Real Estate, Utilities.
+- marketCapMin / marketCapMax: market cap in USD (e.g. 10000000000 = $10B). For ETFs this means fund net assets.
+- priceMin / priceMax: share price in USD.
+- dayChangeMin / dayChangeMax: percent change TODAY (e.g. 5 = up 5%, -3 = down 3%).
+- yearChangeMin / yearChangeMax: percent change over the past 1 YEAR (52 weeks).
+- volumeMin: minimum shares traded today.
+- sort: one of marketcap, gainers (today up), losers (today down), volume, price, yeargainers (1y up), yearlosers (1y down).
+
+IMPORTANT: The screener can only filter on the fields above. The only performance time windows it supports are TODAY and 1 YEAR. If the user asks for a window it can't do (e.g. "up this week"/"last month"), pick the closest available window, say so in your reply, and/or use "curate" on the loaded results.
+
+CURRENT FILTERS:
+${JSON.stringify(spec)}
+
+CURRENT RESULTS ON SCREEN (${visibleItems().length} shown; reason over these for "curate"; divYield is a %, marketCap/volume are absolute):
+${JSON.stringify(aiResultsContext())}`;
+}
+
+function aiResponseSchema() {
+  const NUM = { type: "NUMBER" };
+  return {
+    type: "OBJECT",
+    properties: {
+      reply: { type: "STRING" },
+      action: { type: "STRING", enum: ["filter", "curate", "none"] },
+      filters: {
+        type: "OBJECT",
+        properties: {
+          type: { type: "STRING", enum: ["stocks", "etfs"] },
+          region: { type: "STRING" },
+          sector: { type: "STRING" },
+          marketCapMin: NUM, marketCapMax: NUM,
+          priceMin: NUM, priceMax: NUM,
+          dayChangeMin: NUM, dayChangeMax: NUM,
+          yearChangeMin: NUM, yearChangeMax: NUM,
+          volumeMin: NUM,
+          sort: { type: "STRING", enum: SORT_VALUES },
+        },
+      },
+      visibleSymbols: { type: "ARRAY", items: { type: "STRING" } },
+    },
+    required: ["reply", "action"],
+  };
+}
+
+function sanitizeSpec(filters) {
+  const f = filters || {};
+  const spec = { ...DEFAULT_SPEC };
+  spec.type = f.type === "etfs" ? "etfs" : "stocks";
+  spec.region = REGION_VALUES.includes(f.region) ? f.region : "us";
+  spec.sector = spec.type === "stocks" && SECTOR_VALUES.includes(f.sector) ? f.sector : null;
+  for (const k of ["marketCapMin","marketCapMax","priceMin","priceMax","dayChangeMin","dayChangeMax","yearChangeMin","yearChangeMax","volumeMin"]) {
+    const n = Number(f[k]);
+    spec[k] = Number.isFinite(n) ? n : null;
+  }
+  spec.sort = SORT_VALUES.includes(f.sort) ? f.sort : "marketcap";
+  return spec;
+}
+
+function applyAIFilters(filters) {
+  state.discover.spec = sanitizeSpec(filters);
+  writeForm(state.discover.spec);
+  clearPresetHighlight();
+  runScreen(true);
+}
+
+function applyAICuration(symbols) {
+  const have = new Set(state.discover.items.map((q) => q.symbol.toUpperCase()));
+  const picked = (symbols || [])
+    .map((s) => String(s).toUpperCase())
+    .filter((s) => have.has(s));
+  state.discover.curation = picked.length ? picked : null;
+  renderDiscover();
+  syncDiscoverAddButtons();
+}
+
+function renderAILog() {
+  const log = $("aiLog");
+  log.innerHTML = "";
+  for (const m of state.ai.history) {
+    const row = document.createElement("div");
+    row.className = "ai-msg ai-" + m.role;
+    row.textContent = m.text;
+    log.appendChild(row);
+  }
+  if (state.ai.busy) {
+    const row = document.createElement("div");
+    row.className = "ai-msg ai-model ai-typing";
+    row.textContent = "Thinking…";
+    log.appendChild(row);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function setAIHint(msg, isErr) {
+  const el = $("aiHint");
+  el.textContent = msg || "";
+  el.classList.toggle("err", Boolean(isErr));
+}
+
+async function aiSend(text) {
+  const msg = text.trim();
+  if (!msg || state.ai.busy) return;
+
+  // Make sure we have a model (also detects a server-side key).
+  if (!state.ai.model) {
+    try { await aiFetchModels(); } catch (e) {
+      if (e.status === 503) { setAIHint("Add your Gemini API key in AI settings (⚙︎) — it's free.", true); openAISettings(); }
+      else setAIHint(aiErrorText(e), true);
+      return;
+    }
+  }
+
+  state.ai.history.push({ role: "user", text: msg });
+  state.ai.busy = true;
+  setAIHint("");
+  renderAILog();
+
+  const contents = state.ai.history.map((m) => ({
+    role: m.role === "user" ? "user" : "model",
+    parts: [{ text: m.text }],
+  }));
+
+  try {
+    const data = await apiAI({
+      action: "generate",
+      model: state.ai.model || DEFAULT_MODEL,
+      systemInstruction: buildSystemPrompt(),
+      contents,
+      responseSchema: aiResponseSchema(),
+      temperature: 0.2,
+    });
+
+    let parsed;
+    try { parsed = JSON.parse(data.text); } catch (_) { parsed = { reply: data.text, action: "none" }; }
+
+    state.ai.history.push({ role: "model", text: parsed.reply || "Done." });
+    state.ai.busy = false;
+    renderAILog();
+
+    if (parsed.action === "filter" && parsed.filters) {
+      applyAIFilters(parsed.filters);
+    } else if (parsed.action === "curate" && Array.isArray(parsed.visibleSymbols)) {
+      applyAICuration(parsed.visibleSymbols);
+    }
+  } catch (e) {
+    state.ai.busy = false;
+    // Drop the optimistic user turn so a retry isn't doubled up.
+    if (state.ai.history.at(-1)?.role === "user") state.ai.history.pop();
+    renderAILog();
+    if (e.status === 503) { setAIHint("Add your Gemini API key in AI settings (⚙︎) — it's free.", true); openAISettings(); }
+    else if (e.status === 401) { setAIHint("That API key was rejected. Check it in AI settings (⚙︎).", true); }
+    else setAIHint(aiErrorText(e), true);
+  }
+}
+
+function aiErrorText(e) {
+  if (!HAS_BACKEND) return "AI search needs the live backend — open the app on Vercel.";
+  return "AI request failed. Please try again.";
+}
+
+/* AI settings (key + model) */
+function openAISettings() {
+  $("aiKeyInput").value = state.ai.key || "";
+  populateModelSelect();
+  $("aiSettingsStatus").textContent = state.ai.models.length
+    ? ""
+    : (state.ai.key ? "Tap “Save & load models”." : "Paste a key, then “Save & load models”.");
+  $("aiSettings").hidden = false;
+}
+
+function populateModelSelect() {
+  const sel = $("aiModelSelect");
+  sel.innerHTML = "";
+  if (!state.ai.models.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "— no models loaded —";
+    sel.appendChild(o);
+    return;
+  }
+  for (const m of state.ai.models) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.displayName && m.displayName !== m.id ? `${m.displayName} (${m.id})` : m.id;
+    sel.appendChild(o);
+  }
+  sel.value = state.ai.model || state.ai.models[0]?.id || "";
+}
+
+async function saveAISettings() {
+  state.ai.key = $("aiKeyInput").value.trim();
+  try { localStorage.setItem(AI_KEY_LS, state.ai.key); } catch (_) {}
+
+  const status = $("aiSettingsStatus");
+  status.classList.remove("err");
+  status.textContent = "Loading models…";
+  try {
+    await aiFetchModels();
+    populateModelSelect();
+    status.textContent = `Loaded ${state.ai.models.length} models. ✓`;
+    setAIHint("");
+  } catch (e) {
+    status.classList.add("err");
+    status.textContent = e.status === 401
+      ? "Key rejected — double-check it."
+      : (e.status === 503 ? "No key set and no server key configured." : "Couldn't load models.");
+  }
+}
+
+function commitModelChoice() {
+  state.ai.model = $("aiModelSelect").value || "";
+  try { localStorage.setItem(AI_MODEL_LS, state.ai.model); } catch (_) {}
 }
 
 /* ── detail sheet + chart ────────────────── */
@@ -847,6 +1253,7 @@ function init() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!$("overlay").hidden) closeDetail();
+    else if (!$("aiSettings").hidden) $("aiSettings").hidden = true;
     else if (!$("accountOverlay").hidden) $("accountOverlay").hidden = true;
   });
   document.addEventListener("click", (e) => {
@@ -872,11 +1279,29 @@ function init() {
     if (btn) setType(btn.dataset.type);
   });
   $("applyFilters").addEventListener("click", () => {
-    $("presetRow").querySelectorAll(".preset").forEach((p) => p.classList.remove("active"));
+    state.discover.spec = readForm();
+    clearPresetHighlight();
     runScreen(true);
   });
   $("resetFilters").addEventListener("click", () => { resetFilters(); runScreen(true); });
   $("loadMore").addEventListener("click", () => runScreen(false));
+  $("clearCuration").addEventListener("click", clearCuration);
+
+  // AI search UI.
+  $("aiForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("aiInput").value;
+    $("aiInput").value = "";
+    aiSend(v);
+  });
+  $("aiSettingsBtn").addEventListener("click", openAISettings);
+  $("aiCloseSettings").addEventListener("click", () => { $("aiSettings").hidden = true; });
+  $("aiSaveSettings").addEventListener("click", saveAISettings);
+  $("aiModelSelect").addEventListener("change", commitModelChoice);
+  $("aiSettings").addEventListener("click", (e) => {
+    if (e.target.id === "aiSettings") $("aiSettings").hidden = true;
+  });
+  loadAISettings();
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.user) refresh(false);

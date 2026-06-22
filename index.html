@@ -72,7 +72,21 @@
   <!-- Discover view -->
   <section class="view" id="view-discover" hidden>
     <div class="discover">
-      <p class="discover-intro">Find new stocks &amp; ETFs across the whole market. Tap a quick pick or open Filters.</p>
+      <p class="discover-intro">Find new stocks &amp; ETFs across the whole market. Ask the AI, tap a quick pick, or open Filters.</p>
+
+      <div class="ai-box">
+        <div class="ai-head">
+          <span class="ai-title">✨ AI search</span>
+          <button class="icon-btn ai-settings-btn" id="aiSettingsBtn" title="AI settings">⚙︎</button>
+        </div>
+        <div class="ai-log" id="aiLog"></div>
+        <form class="ai-form" id="aiForm" autocomplete="off">
+          <input id="aiInput" class="ai-input" type="text"
+            placeholder="Ask AI — e.g. cheap US tech stocks up big this year" />
+          <button class="ai-send" id="aiSend" type="submit" title="Send">➤</button>
+        </form>
+        <div class="ai-hint" id="aiHint"></div>
+      </div>
 
       <div class="preset-row" id="presetRow">
         <button class="preset" data-preset="gainers">📈 Top gainers</button>
@@ -206,6 +220,10 @@
       </details>
 
       <div class="discover-status" id="discoverStatus"></div>
+      <div class="curation-bar" id="curationBar" hidden>
+        <span id="curationText"></span>
+        <button class="curation-clear" id="clearCuration" type="button">Show all</button>
+      </div>
       <div class="content" id="discoverResults"></div>
       <button class="load-more" id="loadMore" type="button" hidden>Load more</button>
     </div>
@@ -223,6 +241,27 @@
     <div class="account-user" id="accountUser">—</div>
     <div class="account-sync" id="accountSync">—</div>
     <button class="account-logout" id="logoutBtn">Log out</button>
+  </div>
+</div>
+
+<!-- AI settings -->
+<div class="overlay account-overlay" id="aiSettings" hidden>
+  <div class="account-sheet ai-settings-sheet">
+    <div class="account-user">✨ AI search settings</div>
+    <p class="ai-settings-note">
+      Powered by Google Gemini. Get a free API key at
+      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
+      It is stored only in your browser.
+    </p>
+    <input id="aiKeyInput" class="login-input" type="password" placeholder="Gemini API key"
+      autocomplete="off" autocapitalize="none" spellcheck="false" />
+    <label class="ai-settings-label" for="aiModelSelect">Model</label>
+    <select id="aiModelSelect" class="ai-model-select"></select>
+    <div class="ai-settings-status" id="aiSettingsStatus"></div>
+    <div class="ai-settings-actions">
+      <button class="btn-ghost" id="aiCloseSettings" type="button">Close</button>
+      <button class="btn-primary" id="aiSaveSettings" type="button">Save &amp; load models</button>
+    </div>
   </div>
 </div>
 

@@ -12,6 +12,11 @@ interactive charts. Real market data, no API key required. Sign in with just a
   (top gainers/losers, most active, large caps, best/worst 1-year performers)
   plus easy advanced filters by country, sector, company size, price,
   performance (today & 1-year) and volume
+- **AI search helper** — describe what you want in plain English and the AI sets
+  the filters for you, or hand-picks from the current results for follow-ups
+  ("only the ones under $100", "hide the Chinese companies", "rank these by
+  value"). Powered by Google Gemini with your own free API key and a
+  model picker
 - **Live prices** for stocks, ETFs, indices and mutual funds
 - **Search** any ticker by symbol or company name (e.g. `AAPL`, `Tesla`, `VOO`)
 - **Custom watchlist** — add/remove symbols, saved per account
@@ -35,6 +40,7 @@ account function stores each user's watchlist in **Vercel KV**.
 | `GET /api/quote?symbol=AAPL&range=1y&interval=1d` | Full OHLC series for the chart |
 | `GET /api/search?q=apple` | Symbol/company search |
 | `POST /api/screen` | Screen all stocks/ETFs by filter spec (Discover) |
+| `POST /api/ai` | AI helper: list Gemini models / generate filter & curation actions |
 | `GET /api/account?user=alice` | Log in / create account, returns the watchlist |
 | `PUT /api/account` | Save a user's watchlist (`{ user, watchlist }`) |
 
@@ -63,6 +69,36 @@ a friendly filter spec into a Yahoo query. The browser just POSTs something like
 
 and gets back a normalized `{ quotes, total, offset, size }`. Filtering runs
 across Yahoo's whole universe, so paging uses `offset` for "Load more".
+
+### The AI helper (`/api/ai`)
+
+The AI search box turns natural language into screener actions. `/api/ai` is a
+thin proxy to the [Google Gemini API](https://ai.google.dev/):
+
+- `POST { action: "models" }` → the Gemini models that support `generateContent`
+  (used to populate the model picker in **AI settings**).
+- `POST { action: "generate", model, systemInstruction, contents, responseSchema }`
+  → a Gemini chat completion.
+
+The browser builds a system prompt describing every filter (with allowed values),
+the current filter state, and a compact snapshot of the stocks currently on
+screen (price, today/1-year change, market cap, P/E, dividend yield, volume,
+exchange, region). Gemini replies with **structured JSON** (enforced via
+`responseSchema`) choosing one of:
+
+- **filter** — a complete new filter set; the app applies it to the form and
+  re-runs the screener across the whole market.
+- **curate** — an ordered subset of the *currently loaded* symbols; the app
+  hand-picks/hides results client-side (great for follow-ups the screener can't
+  express). A "Show all" chip clears the selection.
+- **none** — just a reply / clarifying question.
+
+**API key:** get a free one at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it
+into **AI settings** (⚙︎) — it's stored only in your browser and sent with each
+request. Alternatively the deployer can set a shared `GEMINI_API_KEY` environment
+variable in Vercel; the user's own key always takes precedence. Without either,
+`/api/ai` returns `503` and the UI prompts for a key.
 
 ## Accounts & cloud sync
 
@@ -94,6 +130,7 @@ api/
   quote.js     # serverless: live quotes + chart history (Yahoo proxy)
   search.js    # serverless: symbol search (Yahoo proxy)
   screen.js    # serverless: market screener / discovery (Yahoo proxy)
+  ai.js        # serverless: Google Gemini proxy for the AI search helper
   account.js   # serverless: username login + watchlist sync (Vercel KV)
 css/styles.css
 js/app.js      # all front-end logic (auth + viewer)
